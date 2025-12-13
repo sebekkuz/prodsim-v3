@@ -4,15 +4,10 @@
 /**
  * PRODSIM v3 - SIMULATION ENGINE WORKER
  * ======================================
- * Główny silnik obliczeniowy symulacji (Discrete Event Simulation).
- * Działa w osobnym wątku (Web Worker) dla wydajności.
- * * ETAP 1: FUNDAMENTY I PRAWDA BIZNESOWA
- * - Fix Finansowy (CPU uwzględnia braki)
- * - Walidacja Danych (Integrity Check)
- * - Determinizm (Poprzez PriorityQueue)
+ * ETAP 1.3: INTEGRITY CHECK
+ * - Zabezpieczenie przed uruchomieniem symulacji na niespójnych danych.
  */
 
-// Import kolejki priorytetowej (zewnętrzny moduł dla czystości kodu)
 try {
     importScripts('priority_queue.js');
 } catch (e) {
@@ -20,298 +15,167 @@ try {
     self.postMessage({ type: 'FATAL_ERROR', payload: ["Nie można załadować 'priority_queue.js'. Sprawdź pliki publiczne."] });
 }
 
-// ==========================================================================
-// CZĘŚĆ 1: MODELE DANYCH (KLASY)
-// ==========================================================================
+// === MODELE DANYCH ===
 
-/**
- * Reprezentuje pojedynczą sztukę produktu (lub podzespół) przepływającą przez system.
- */
 class Part {
     constructor(id, orderId, partType, partCode, size, routing, childrenBOM, creationTime, dueDate = null) {
         this.id = `part_${id}`;
         this.orderId = orderId;
-        this.type = partType; // 'PARENT' (Obudowa) lub 'CHILD' (Funkcja)
+        this.type = partType;
         this.code = partCode;
         this.size = size;
-        
-        // Marszruta i BOM
         this.routing = routing || [];
-        this.routingStep = 0; // Index aktualnej operacji
-        this.childrenBOM = childrenBOM || []; // Co trzeba zamontować (jeśli to Parent)
-        this.attachedChildren = []; // Co już zamontowano
-        
-        // Stan i Lokalizacja
-        this.state = 'CREATED'; // CREATED, IDLE_..., PROCESSING, BLOCKED, FINISHED, SCRAPPED
+        this.routingStep = 0;
+        this.childrenBOM = childrenBOM || [];
+        this.attachedChildren = [];
+        this.state = 'CREATED';
         this.currentLocation = null;
-        
-        // Czasy
         this.creationTime = creationTime;
         this.finishTime = null;
         this.lastStateChangeTime = creationTime;
         this.dueDate = dueDate;
-        
-        // Finanse (Uproszczony model kosztów materiałowych)
-        // W przyszłości można pobierać z bazy DB
         this.materialCost = partType === 'PARENT' ? 100 : 20;
-        
-        // Statystyki szczegółowe (dla raportu Lead Time Breakdown)
-        this.stats = {
-            processingTime: 0, // Wartość dodana
-            transportTime: 0,  // Logistyka
-            waitTime: 0,       // Oczekiwanie (Muda)
-            blockedTime: 0     // Blokada wyjścia (Muda)
-        };
+        this.stats = { processingTime: 0, transportTime: 0, waitTime: 0, blockedTime: 0 };
     }
 
     updateState(newState, currentTime) {
         const duration = Math.max(0, currentTime - this.lastStateChangeTime);
-        
-        // Akumulacja czasu w odpowiednim kuble statystyk
         switch (this.state) {
-            case 'PROCESSING':
-                this.stats.processingTime += duration;
-                break;
+            case 'PROCESSING': this.stats.processingTime += duration; break;
             case 'IN_TRANSPORT':
-            case 'WAITING_FOR_WORKER_TRAVEL':
-                this.stats.transportTime += duration;
-                break;
+            case 'WAITING_FOR_WORKER_TRAVEL': this.stats.transportTime += duration; break;
             case 'IDLE_IN_BUFFER':
             case 'IDLE_AT_STATION':
             case 'WAITING_FOR_WORKER':
-            case 'WAITING_FOR_TOOL':
-                this.stats.waitTime += duration;
-                break;
-            case 'BLOCKED':
-                this.stats.blockedTime += duration;
-                break;
+            case 'WAITING_FOR_TOOL': this.stats.waitTime += duration; break;
+            case 'BLOCKED': this.stats.blockedTime += duration; break;
         }
-
         this.state = newState;
         this.lastStateChangeTime = currentTime;
-
-        // Jeśli to stan końcowy, zapisz czas zakończenia
         if (newState === 'FINISHED' || newState === 'SCRAPPED') {
             this.finishTime = currentTime;
         }
     }
 
     getNextOperation() {
-        if (this.routingStep < this.routing.length) {
-            return this.routing[this.routingStep];
-        }
+        if (this.routingStep < this.routing.length) return this.routing[this.routingStep];
         return null;
     }
 }
 
-/**
- * Reprezentuje pulę zasobów współdzielonych (Pracownicy, Narzędzia).
- */
 class ResourcePool {
     constructor(name, capacity, speed, engine, costPerHour) {
         this.name = name;
         this.capacity = capacity;
         this.speed = speed || 1.0;
         this.costPerHour = costPerHour || 0;
-        
         this.available = capacity;
-        this.waitQueue = []; // Kolejka FIFO dla oczekujących na zasób
+        this.waitQueue = [];
         this.engine = engine;
-        
-        // Statystyki
         this.totalBusyTimeSeconds = 0;
-        // NOTE: Idle Time dodamy w Etapie 2
+        // Idle Time dodamy w Etapie 2
     }
 
     request(entity, count) {
-        if (count > this.capacity) return false; // Zasób nigdy nie będzie w stanie obsłużyć żądania
-        
+        if (count > this.capacity) return false;
         if (this.available >= count) {
             this.available -= count;
             return true;
         } else {
-            // Dodaj do kolejki oczekujących, jeśli jeszcze tam nie jest
             const exists = this.waitQueue.some(item => item.entity.id === entity.id);
-            if (!exists) {
-                this.waitQueue.push({ entity, count });
-            }
+            if (!exists) this.waitQueue.push({ entity, count });
             return false;
         }
     }
 
     release(entityReleasing, count, busyTimeDuration = 0) {
         this.available += count;
-        if (this.available > this.capacity) this.available = this.capacity; // Safety check
-        
-        // Zliczanie czasu pracy (roboczogodziny)
-        // Praca = Czas trwania czynności * Liczba zaangażowanych zasobów
+        if (this.available > this.capacity) this.available = this.capacity;
         this.totalBusyTimeSeconds += (busyTimeDuration * 3600 * count);
-
-        // Automatyczne przydzielenie zwolnionego zasobu oczekującym
         if (this.waitQueue.length > 0) {
             const nextInQueue = this.waitQueue[0];
             if (this.available >= nextInQueue.count) {
                 this.available -= nextInQueue.count;
                 const unblocked = this.waitQueue.shift();
-                return unblocked.entity; // Zwracamy obiekt, który został odblokowany
+                return unblocked.entity;
             }
         }
         return null;
     }
 }
 
-// ==========================================================================
-// CZĘŚĆ 2: GŁÓWNY SILNIK (SIMULATION ENGINE)
-// ==========================================================================
+// === SILNIK ===
 
 class SimulationEngine {
-    constructor() {
-        this.reset();
-    }
+    constructor() { this.reset(); }
 
     reset() {
         this.log = [];
-        // Kolejka zdarzeń (Priority Queue)
-        // Sprawdzenie czy klasa została załadowana
         this.eventQueue = typeof PriorityQueue !== 'undefined' ? new PriorityQueue() : { push:()=>{}, pop:()=>{}, isEmpty:()=>true };
-        
-        this.simulationTime = 0; // Czas symulacji w godzinach
-        
+        this.simulationTime = 0;
         this.config = {};
         this.db = {};
         this.mrp = [];
         this.settings = {};
-        
         this.workerPools = {};
         this.toolPools = {};
-        
         this.parts = {};
         this.partCounter = 0;
-        
         this.bufferStates = {};
         this.stationStates = {};
-        
-        this.replayEvents = []; // Tablica zdarzeń do odtwarzania wizualizacji (Event Sourcing)
+        this.replayEvents = [];
         this.orderMap = {};
-        
-        this.stats = {
-            partsProcessed: 0,
-            partsScrapped: 0,
-            cycleTimes: [],
-            workInProcess: [], // Próbki WIP w czasie
-            bottleneckSnapshots: []
-        };
-        
+        this.stats = { partsProcessed: 0, partsScrapped: 0, cycleTimes: [], workInProcess: [], bottleneckSnapshots: [] };
         this.shiftsConfig = {};
     }
 
-    logMessage(msg) {
-        this.log.push(msg);
-    }
-
-    // --- REJESTRACJA ZDARZEŃ (Dla Wizualizacji i Debuggingu) ---
+    logMessage(msg) { this.log.push(msg); }
 
     recordStateChange(stationId, status, meta = {}) {
-        this.replayEvents.push({
-            type: 'STATION_STATE',
-            time: this.simulationTime,
-            stationId: stationId,
-            status: status, // RUN, IDLE, BLOCKED, WAITING_FOR_WORKER, STOP
-            meta: meta
-        });
+        this.replayEvents.push({ type: 'STATION_STATE', time: this.simulationTime, stationId, status, meta });
     }
 
     recordBufferState(bufferId, queue) {
-        // Zapisujemy tylko ID i kody dla oszczędności pamięci
         const contentList = queue.slice(0, 50).map(partId => {
             const p = this.parts[partId];
             return p ? { code: p.code, orderId: p.orderId } : { code: '?', orderId: '?' };
         });
-        
-        this.replayEvents.push({
-            type: 'BUFFER_STATE',
-            time: this.simulationTime,
-            bufferId: bufferId,
-            count: queue.length,
-            content: contentList
-        });
+        this.replayEvents.push({ type: 'BUFFER_STATE', time: this.simulationTime, bufferId, count: queue.length, content: contentList });
     }
 
     recordTransport(part, fromId, toId, startTime, arrivalTime) {
-        let subCode = part.code;
-        if (part.code.includes('-')) subCode = part.code.split('-').pop();
-        
+        let subCode = part.code.includes('-') ? part.code.split('-').pop() : part.code;
         this.replayEvents.push({
-            type: 'TRANSPORT',
-            startTime: startTime,
-            endTime: arrivalTime,
-            from: fromId,
-            to: toId,
-            partId: part.id,
-            orderId: part.orderId,
-            partCode: part.code,
-            subCode: subCode,
-            isAssembled: part.attachedChildren.length > 0,
-            duration: arrivalTime - startTime
+            type: 'TRANSPORT', startTime, endTime: arrivalTime, from: fromId, to: toId,
+            partId: part.id, orderId: part.orderId, partCode: part.code, subCode,
+            isAssembled: part.attachedChildren.length > 0, duration: arrivalTime - startTime
         });
     }
 
     recordWorkerTravel(poolId, stationId, startTime, arrivalTime) {
-        this.replayEvents.push({
-            type: 'WORKER_TRAVEL',
-            startTime: startTime,
-            endTime: arrivalTime,
-            from: poolId,
-            to: stationId
-        });
+        this.replayEvents.push({ type: 'WORKER_TRAVEL', startTime, endTime: arrivalTime, from: poolId, to: stationId });
     }
 
     recordResourceUsage(poolId, usageType, partId, startTime, endTime, meta = {}) {
-        this.replayEvents.push({
-            type: 'RESOURCE_USAGE',
-            poolId,
-            usageType,
-            startTime,
-            endTime,
-            duration: endTime - startTime,
-            partId,
-            meta
-        });
+        this.replayEvents.push({ type: 'RESOURCE_USAGE', poolId, usageType, startTime, endTime, duration: endTime - startTime, partId, meta });
     }
-
-    // --- LOGIKA CZASU (ZMIANY I KALENDARZ) ---
 
     isWorkingTime(timeHour) {
         const dayIndex = Math.floor(timeHour / 24);
         const hourOfDay = timeHour % 24;
-        
-        if (!this.shiftsConfig) return true; // Domyślnie 24/7
-
+        if (!this.shiftsConfig) return true;
         let isWorking = false;
-        
         Object.values(this.shiftsConfig).forEach(shift => {
             if (!shift.active) return;
-            
-            // Dni tygodnia (0-6, start 1 stycznia 2025 = Środa)
-            // Uproszczenie: dayIndex 0 = Dzień startu symulacji
             const currentDayOfWeek = dayIndex % 7;
             if (currentDayOfWeek >= shift.days) return;
-
             const [sH, sM] = shift.start.split(':').map(Number);
             const [eH, eM] = shift.end.split(':').map(Number);
-            
             const startVal = sH + sM/60;
             const endVal = eH + eM/60;
-            
-            if (endVal > startVal) {
-                // Zmiana dzienna
-                if (hourOfDay >= startVal && hourOfDay < endVal) isWorking = true;
-            } else {
-                // Zmiana nocna (przejście przez północ)
-                if (hourOfDay >= startVal || hourOfDay < endVal) isWorking = true;
-            }
+            if (endVal > startVal) { if (hourOfDay >= startVal && hourOfDay < endVal) isWorking = true; }
+            else { if (hourOfDay >= startVal || hourOfDay < endVal) isWorking = true; }
         });
-        
         return isWorking;
     }
 
@@ -320,26 +184,21 @@ class SimulationEngine {
         let cursor = startTime;
         const MAX_ITERATIONS = 10000;
         let iterations = 0;
-
-        // Jeśli startujemy w czasie wolnym, przesuń do najbliższego czasu pracy
         while (!this.isWorkingTime(cursor) && iterations < 168) {
              const timeToNextHour = Math.ceil(cursor) - cursor;
              cursor += (timeToNextHour === 0 ? 1.0 : timeToNextHour);
              iterations++;
         }
-
         iterations = 0;
         while (remainingWork > 0.0001 && iterations < MAX_ITERATIONS) {
             iterations++;
             if (this.isWorkingTime(cursor)) {
                 const timeToNextHour = Math.ceil(cursor) - cursor;
                 const step = (timeToNextHour === 0) ? 1.0 : timeToNextHour;
-                
                 const workToDo = Math.min(remainingWork, step);
                 cursor += workToDo;
                 remainingWork -= workToDo;
             } else {
-                // Przeskocz czas wolny
                 const timeToNextHour = Math.ceil(cursor) - cursor;
                 cursor += (timeToNextHour === 0 ? 1.0 : timeToNextHour);
             }
@@ -349,9 +208,7 @@ class SimulationEngine {
     
     calculateWorkingHoursDuration(totalDuration) {
         let paidHours = 0;
-        for (let t = 0; t < totalDuration; t++) {
-            if (this.isWorkingTime(t)) paidHours += 1;
-        }
+        for (let t = 0; t < totalDuration; t++) { if (this.isWorkingTime(t)) paidHours += 1; }
         return paidHours;
     }
 
@@ -377,54 +234,70 @@ class SimulationEngine {
         this.settings = settings || { startDate: '18-11-2025' };
         this.shiftsConfig = this.settings.shifts || {};
 
-        // === ETAP 1 (PODPUNKT 3): INTEGRITY CHECK ===
-        // Walidacja danych przed uruchomieniem, aby uniknąć błędnych wyników finansowych
+        // === ETAP 1.3: INTEGRITY CHECK (WALIDACJA DANYCH) ===
+        // To jest kluczowy moment. Zanim puścimy pętlę, sprawdzamy czy mamy komplet danych.
+        // Jeśli brakuje marszruty dla produktu z MRP, silnik zatrzyma się z błędem.
+        
         const validationErrors = [];
+        
+        // Iterujemy po wszystkich zleceniach
         this.mrp.forEach(order => {
-            if (!order['Sekcje'] || !order['Rozmiar']) return;
+            if (!order['Sekcje'] || !order['Rozmiar']) return; // Pomiń puste wiersze
+            
+            // Parsujemy strukturę produktu, żeby wiedzieć czego szukać w bazie marszrut
             const bom = this.parseOrderString(order['Sekcje'], order['Rozmiar']);
+            
             bom.forEach(parentBOM => {
-                // Sprawdzamy kluczową marszrutę dla obudowy (phase0)
-                const rKey = `casings_${parentBOM.size}_${parentBOM.code}_phase0`;
-                if (!this.config.routings[rKey]) {
-                    validationErrors.push(`Błąd Krytyczny: Brak marszruty dla produktu ${rKey} (Zlecenie: ${order['Zlecenie']})`);
+                // Generujemy klucz marszruty dla głównego komponentu (obudowy)
+                // Format klucza musi zgadzać się z tym w ModuleRouting / config.routings
+                const routingKey = `casings_${parentBOM.size}_${parentBOM.code}_phase0`;
+                
+                if (!this.config.routings[routingKey]) {
+                    validationErrors.push(
+                        `BŁĄD DANYCH: Brak zdefiniowanej marszruty dla "${routingKey}" (Zlecenie: ${order['Zlecenie'] || '?'})`
+                    );
                 }
+                
+                // Opcjonalnie: można też sprawdzać marszruty montażowe (phase1)
+                // const assemblyKey = `casings_${parentBOM.size}_${parentBOM.code}_phase1`;
+                // if (!this.config.routings[assemblyKey]) validationErrors.push(`Ostrzeżenie: Brak montażu dla ${assemblyKey}`);
             });
         });
 
         if (validationErrors.length > 0) {
-            this.logMessage("!!! PRZERWANO: Błędy integralności danych:");
+            this.logMessage("!!! PRZERWANO: Wykryto błędy integralności danych:");
+            // Pokaż pierwsze 10 błędów, żeby nie zaspamować logu
             validationErrors.slice(0, 10).forEach(e => this.logMessage(e));
-            if(validationErrors.length > 10) this.logMessage(`...i ${validationErrors.length - 10} innych.`);
-            return ["BŁĄD DANYCH: Wykryto braki w definicjach marszrut. Symulacja zatrzymana."];
+            if (validationErrors.length > 10) {
+                this.logMessage(`...oraz ${validationErrors.length - 10} innych błędów.`);
+            }
+            this.logMessage("Napraw konfigurację marszrut lub plik MRP i spróbuj ponownie.");
+            
+            // Zwracamy tablicę z komunikatem błędu, co zatrzyma worker
+            return ["FATAL: Błędy danych. Sprawdź log symulacji."];
         }
-        // === KONIEC INTEGRITY CHECK ===
+        // === KONIEC WALIDACJI ===
 
-        // Inicjalizacja Stanów
         this.config.buffers.forEach(buffer => { 
             this.bufferStates[buffer.id] = { queue: [], maxQueue: 0, sumQueue: 0, queueSamples: 0 }; 
         });
-        
         this.config.stations.forEach(station => { 
             this.stationStates[station.id] = { 
                 queue: [], busySlots: 0, totalBusyTime: 0, totalStarvedTime: 0, 
                 maxQueue: 0, sumQueue: 0, queueSamples: 0, breakdowns: [], incoming: 0 
             }; 
         });
-        
         if (this.config.workerPools) {
             this.config.workerPools.forEach(pool => {
                 this.workerPools[pool.id] = new ResourcePool(pool.name, pool.capacity, pool.speed, this, pool.costPerHour);
             });
         }
-        
         if (this.config.toolPools) {
             this.config.toolPools.forEach(pool => {
                 this.toolPools[pool.id] = new ResourcePool(pool.name, pool.capacity, pool.speed, this, 0);
             });
         }
 
-        // Generowanie Zdarzeń Wejściowych (Order Arrivals)
         this.mrp.forEach((order, index) => {
             const orderDate = order['Data  zlecenia'] || order['Data zlecenia'];
             const orderDueDate = order['Termin'] || order['Data realizacji'] || null;
@@ -436,56 +309,44 @@ class SimulationEngine {
             
             const arrivalTime = Math.max(0, this.getHourDifference(this.settings.startDate, orderDate));
             const dueTime = orderDueDate ? Math.max(arrivalTime + 24, this.getHourDifference(this.settings.startDate, orderDueDate)) : null;
-            
-            // Przesunięcie startu na godziny pracy
             const workStartArrivalTime = this.calculateCompletionTime(arrivalTime, 0);
 
-            this.scheduleEvent(workStartArrivalTime, 'ORDER_ARRIVAL', { 
-                order: { orderId, orderString, orderSize, dueDate: dueTime } 
-            });
+            this.scheduleEvent(workStartArrivalTime, 'ORDER_ARRIVAL', { order: { orderId, orderString, orderSize, dueDate: dueTime } });
         });
 
         if (!this.eventQueue || this.eventQueue.isEmpty()) {
-            this.logMessage("[WARN] Brak zleceń do przetworzenia.");
+            this.logMessage("Brak zleceń.");
         } else {
             this.run();
         }
-        
         return this.log;
     }
 
     run() {
         const anyShiftActive = Object.values(this.shiftsConfig).some(s => s.active);
         if (!anyShiftActive) {
-            self.postMessage({ type: 'SIMULATION_RESULTS', payload: { error: "Błąd konfiguracji: Brak aktywnych zmian w kalendarzu." } });
+            self.postMessage({ type: 'SIMULATION_RESULTS', payload: { error: "Brak aktywnych zmian." } });
             return;
         }
 
-        this.logMessage(`[Engine] Rozpoczynam symulację...`);
-        
+        this.logMessage(`[Engine] Start symulacji.`);
         let steps = 0;
-        const MAX_STEPS = 800000; // Bezpiecznik pętli
+        const MAX_STEPS = 800000;
         let nextWipSample = 0.0;
 
-        // GŁÓWNA PĘTLA SYMULACJI (Event Loop)
         while (!this.eventQueue.isEmpty()) {
             steps++;
-            if (steps > MAX_STEPS) { 
-                this.logMessage(`! Ostrzeżenie: Osiągnięto limit kroków (${MAX_STEPS}). Możliwa pętla nieskończona.`); 
-                break; 
-            }
+            if (steps > MAX_STEPS) { this.logMessage(`! Limit kroków.`); break; }
             
             const event = this.eventQueue.pop();
             const timeDelta = event.time - this.simulationTime;
             
-            // Aktualizacja statystyk ciągłych (jeśli upłynął czas)
             if (timeDelta > 0 && this.isWorkingTime(this.simulationTime)) {
                  this.updateStarvationStats(timeDelta);
             }
             
             this.simulationTime = event.time;
             
-            // Próbkowanie WIP (Work In Process) co godzinę
             if (this.simulationTime >= nextWipSample) {
                 const activeParts = Object.values(this.parts).filter(p => p.state !== 'FINISHED' && p.state !== 'SCRAPPED');
                 this.stats.workInProcess.push({ 
@@ -494,31 +355,20 @@ class SimulationEngine {
                     value: activeParts.reduce((sum, p) => sum + p.materialCost, 0) 
                 });
                 
-                // Bottleneck Snapshot (Wykrywanie wąskich gardeł)
-                let maxLoad = -1;
-                let bottleNeckId = null;
+                let maxLoad = -1, bottleNeckId = null;
                 Object.keys(this.stationStates).forEach(sId => {
                     const st = this.stationStates[sId];
                     const def = this.config.stations.find(s => s.id === sId);
-                    // Obciążenie = Zajęte sloty / Pojemność
                     const currentLoad = st.busySlots / (def.capacity || 1);
                     if (currentLoad > maxLoad) { maxLoad = currentLoad; bottleNeckId = sId; }
                 });
-                
-                if (bottleNeckId && maxLoad > 0) {
-                    this.stats.bottleneckSnapshots.push({ 
-                        time: this.simulationTime, 
-                        stationId: bottleNeckId, 
-                        load: maxLoad 
-                    });
-                }
+                if (bottleNeckId && maxLoad > 0) this.stats.bottleneckSnapshots.push({ time: this.simulationTime, stationId: bottleNeckId, load: maxLoad });
                 
                 nextWipSample += 1.0; 
             }
 
             this.handleEvent(event);
         }
-        
         this.finalizeSimulation();
     }
     
@@ -528,8 +378,6 @@ class SimulationEngine {
             const state = this.stationStates[stationId];
             const stationDef = this.config.stations.find(s => s.id === stationId);
             const capacity = stationDef.capacity || 1;
-            
-            // Starvation: Maszyna mogłaby pracować (ma wolne sloty), ale nie ma wsadu
             if (state.queue.length === 0 && state.busySlots < capacity) {
                 state.totalStarvedTime += (timeDelta * (capacity - state.busySlots));
             }
@@ -560,22 +408,16 @@ class SimulationEngine {
             };
         }
         
-        // === ETAP 1 FIX: POPRAWKA FINANSOWA (CPU) ===
-        // PROBLEM: Wcześniej liczono materiał tylko dla produktów dobrych.
-        // ROZWIĄZANIE: Koszt materiałowy musi obejmować też braki (SCRAPPED).
         const materialConsumedParts = Object.values(this.parts).filter(p => p.state === 'FINISHED' || p.state === 'SCRAPPED');
         const totalMaterialCost = materialConsumedParts.reduce((sum, p) => sum + p.materialCost, 0);
 
-        let totalLaborCost = 0;
-        let totalEnergyCost = 0;
+        let totalLaborCost = 0, totalEnergyCost = 0;
         const workerStats = [];
 
         [...Object.values(this.workerPools), ...Object.values(this.toolPools)].forEach(pool => {
             const rate = pool.costPerHour || 0;
-            // Płacimy za obecność (Attendance), nie tylko za pracę
             const paidHours = workingHoursTotal * pool.capacity;
             const attendanceCost = paidHours * rate;
-            
             const hoursWorked = pool.totalBusyTimeSeconds / 3600;
             const utilizedCost = hoursWorked * rate;
             
@@ -594,7 +436,7 @@ class SimulationEngine {
         const totalLaborCostReal = workerStats.reduce((sum, w) => sum + parseFloat(w.attendanceCost), 0);
 
         const stationStats = [];
-        const ENERGY_COST_PER_H = 0.5; // Stała (można wyciągnąć do settings)
+        const ENERGY_COST_PER_H = 0.5;
         Object.keys(this.stationStates).forEach(stationId => {
             const state = this.stationStates[stationId];
             const def = this.config.stations.find(s => s.id === stationId);
@@ -622,47 +464,33 @@ class SimulationEngine {
             });
         });
 
-        // CPU = Całkowity Koszt Produkcji / Ilość Dobrych Sztuk
         const totalProductionCost = totalLaborCostReal + totalEnergyCost + totalMaterialCost;
         const cpu = count > 0 ? (totalProductionCost / count) : 0;
 
         const detailedReports = this.calculateDetailedStats();
-        
-        // Obliczanie OTIF (On Time In Full)
-        const ordersWithDeadline = detailedReports.orders.filter(o => o.status !== 'BEZ TERMINU');
-        const otif = ordersWithDeadline.length > 0 
-            ? (ordersWithDeadline.filter(o => o.onTime).length / ordersWithDeadline.length * 100) 
+        const otif = detailedReports.orders.filter(o => o.status !== 'BEZ TERMINU').length > 0 
+            ? (detailedReports.orders.filter(o => o.status !== 'BEZ TERMINU' && o.onTime).length / detailedReports.orders.filter(o => o.status !== 'BEZ TERMINU').length * 100) 
             : 100;
 
-        // Agregacja Dynamicznych Wąskich Gardeł
         const bMap = {};
         this.stats.bottleneckSnapshots.forEach(s => bMap[s.stationId] = (bMap[s.stationId] || 0) + 1);
         const dynamicBottlenecks = Object.entries(bMap).map(([id, val]) => ({
-            id, 
-            name: this.config.stations.find(s => s.id === id)?.name || id, 
-            hours: val
+            id, name: this.config.stations.find(s => s.id === id)?.name || id, hours: val
         })).sort((a,b) => b.hours - a.hours);
 
-        // Pakowanie wyników
         const results = {
-            duration,
-            workingHoursTotal,
-            produced: this.stats.partsProcessed,
-            scrapped: this.stats.partsScrapped,
-            avgLeadTime,
-            avgFlowEfficiency,
-            leadTimeBreakdown,
+            duration, workingHoursTotal, produced: this.stats.partsProcessed, scrapped: this.stats.partsScrapped,
+            avgLeadTime, avgFlowEfficiency, leadTimeBreakdown,
             actualTakt: this.stats.partsProcessed > 0 ? workingHoursTotal / this.stats.partsProcessed : 0,
             targetTakt: parseFloat(this.settings.targetTakt || 0)/60,
             otif: otif.toFixed(1),
             cpu: cpu.toFixed(2),
             totalLaborCost: totalLaborCostReal,
             totalEnergyCost,
-            totalMaterialCost, // Info dla debugowania
+            totalMaterialCost, 
             stationStats,
             bufferStats: Object.keys(this.bufferStates).map(bid => ({
-                id: bid, 
-                name: this.config.buffers.find(b => b.id === bid).name,
+                id: bid, name: this.config.buffers.find(b => b.id === bid).name,
                 maxQueue: this.bufferStates[bid].maxQueue,
                 utilization: (this.bufferStates[bid].maxQueue / this.config.buffers.find(b => b.id === bid).capacity * 100).toFixed(1)
             })),
@@ -675,7 +503,7 @@ class SimulationEngine {
             shiftSettings: this.settings.shifts
         };
 
-        this.logMessage(`Symulacja zakończona pomyślnie. CPU: ${cpu.toFixed(2)} PLN.`);
+        this.logMessage(`Symulacja zakończona. CPU: ${cpu.toFixed(2)} PLN.`);
         self.postMessage({ type: 'SIMULATION_RESULTS', payload: results });
     }
 
@@ -683,44 +511,28 @@ class SimulationEngine {
         this.eventQueue.push({ time, type, payload });
     }
 
-    // --- DISPATCHER ZDARZEŃ ---
-
     handleEvent(event) {
         switch(event.type) {
-            case 'ORDER_ARRIVAL':
-                this.handleOrderArrival(event.payload);
-                break;
-            case 'PART_ARRIVES_AT_NODE':
-                this.handlePartArrivalAtNode(event.payload);
-                break;
-            case 'WORKER_ARRIVES_AT_STATION':
-                this.handleWorkerArrives(event.payload);
-                break;
-            case 'OPERATION_COMPLETE':
-                this.handleOperationComplete(event.payload);
-                break;
-            case 'TRANSPORT_COMPLETE':
-                this.handleTransportComplete(event.payload);
-                break;
+            case 'ORDER_ARRIVAL': this.handleOrderArrival(event.payload); break;
+            case 'PART_ARRIVES_AT_NODE': this.handlePartArrivalAtNode(event.payload); break;
+            case 'WORKER_ARRIVES_AT_STATION': this.handleWorkerArrives(event.payload); break;
+            case 'OPERATION_COMPLETE': this.handleOperationComplete(event.payload); break;
+            case 'TRANSPORT_COMPLETE': this.handleTransportComplete(event.payload); break;
         }
     }
-
-    // --- HANDLERY LOGIKI BIZNESOWEJ ---
 
     handleOrderArrival(payload) {
         const { order } = payload;
         this.orderMap[order.orderId] = order.orderString;
         try {
             const bom = this.parseOrderString(order.orderString, order.orderSize);
-            
-            // Staggering (Odstępy między sekcjami, by nie zalać linii)
             let stagger = 0;
             bom.forEach(parentBOM => {
                 this.createAndSendPart(order, parentBOM, 'casings', order.dueDate, stagger);
                 parentBOM.childrenBOM.forEach(childBOM => {
                     this.createAndSendPart(order, childBOM, 'functions', order.dueDate, stagger);
                 });
-                stagger += 0.05; // 3 minuty
+                stagger += 0.05;
             });
         } catch (e) { this.logMessage(`Błąd zlecenia: ${e.message}`); }
     }
@@ -735,8 +547,6 @@ class SimulationEngine {
         if (bufferNode) {
             part.updateState('IDLE_IN_BUFFER', this.simulationTime);
             this.bufferStates[nodeId].queue.push(part.id);
-            
-            // Aktualizacja statystyk bufora
             if(this.bufferStates[nodeId].queue.length > this.bufferStates[nodeId].maxQueue) 
                 this.bufferStates[nodeId].maxQueue = this.bufferStates[nodeId].queue.length;
             this.recordBufferState(nodeId, this.bufferStates[nodeId].queue);
@@ -747,11 +557,7 @@ class SimulationEngine {
                 this.stats.cycleTimes.push(this.simulationTime - part.creationTime);
                 return;
             }
-            
-            // Logika Push: Próbuj wysłać dalej
             this.tryPushFromBuffer(nodeId);
-            
-            // Logika Pull (Montaż): Sprawdź czy to bufor przed montażem
             const montazFlow = this.config.flows.find(f => f.from === nodeId && this.config.stations.find(s => s.id === f.to && s.type === 'montaz'));
             if(montazFlow) this.tryStartMontaz(montazFlow.to);
             return;
@@ -773,7 +579,6 @@ class SimulationEngine {
         const bufferState = this.bufferStates[bufferId];
         if (bufferState.queue.length === 0) return;
         
-        // FIFO: Bierzemy pierwszy element
         const partId = bufferState.queue[0];
         const part = this.parts[partId];
         const nextOp = part.getNextOperation();
@@ -785,7 +590,6 @@ class SimulationEngine {
         const flow = this.config.flows.find(f => f.from === bufferId && f.to === targetStation.id);
         if (!flow) return;
 
-        // Sprawdź Input Buffer stacji docelowej
         const stState = this.stationStates[targetStation.id];
         const limit = (targetStation.capacity || 1) + 2; 
         if ((stState.queue.length + stState.incoming) < limit) {
@@ -806,7 +610,6 @@ class SimulationEngine {
         let parentPart = null;
         let parentBufferId = null;
 
-        // 1. Znajdź Obudowę (Parent)
         for (const flow of inputFlows) {
             const bState = this.bufferStates[flow.from];
             if (!bState || bState.queue.length === 0) continue;
@@ -820,7 +623,6 @@ class SimulationEngine {
 
         if (!parentPart) return;
 
-        // 2. Znajdź Funkcje (Children)
         const requiredChildren = parentPart.childrenBOM;
         let childrenFound = [];
 
@@ -835,7 +637,6 @@ class SimulationEngine {
             const cbState = this.bufferStates[targetFlow.from];
             if (cbState.queue.length === 0) { childrenFound = null; break; }
             
-            // Sprawdzenie zgodności kodu (Sequencing)
             const candidate = this.parts[cbState.queue[0]];
             if (candidate.code === childBOM.code && candidate.size === childBOM.size) {
                 childrenFound.push({ partId: cbState.queue[0], bufferId: targetFlow.from });
@@ -844,9 +645,8 @@ class SimulationEngine {
             }
         }
 
-        if (!childrenFound) return; // Niekompletny zestaw
+        if (!childrenFound) return;
 
-        // 3. Pobranie elementów
         childrenFound.forEach(item => {
             const q = this.bufferStates[item.bufferId].queue;
             q.shift();
@@ -863,7 +663,6 @@ class SimulationEngine {
         parentPart.currentLocation = stationId;
         stState.queue.push(parentPart.id);
 
-        // 4. Ustalenie nowej marszruty (Montaż)
         let assemblyOps = [];
         const seq = this.settings.assemblySequence || [];
         const getOps = (p) => {
@@ -889,20 +688,16 @@ class SimulationEngine {
         if (!this.isWorkingTime(this.simulationTime)) return;
         const stState = this.stationStates[stationId];
         const stDef = this.config.stations.find(s => s.id === stationId);
-        
         if (stState.queue.length === 0 || stState.busySlots >= (stDef.capacity || 1)) return;
 
         const partId = stState.queue[0];
         const part = this.parts[partId];
-        
-        // Logika wyboru operacji
         let requiredOps = 1;
         let opTime = 0.1;
 
         if (stDef.type === 'podmontaz' || stDef.type === 'montaz') {
             const op = part.getNextOperation();
             if (!op) {
-                // Sytuacja awaryjna: część na stacji bez operacji
                 stState.queue.shift();
                 this.handleOperationComplete({ partId, stationId, poolId: null, requiredOperators: 0, duration: 0 });
                 return;
@@ -910,7 +705,6 @@ class SimulationEngine {
             requiredOps = op.operators || 1;
             opTime = op.time || 0.1;
         } else {
-            // Stacje specjalne (Jakość / Pakowanie)
             const setKey = stDef.type === 'jakosci' ? 'qualitySettings' : 'packingSettings';
             const rule = (this.settings[setKey] || {})[part.size];
             if (rule) {
@@ -919,45 +713,29 @@ class SimulationEngine {
             }
         }
 
-        // Zmienność czasu (Variance)
         if (stDef.variance > 0) opTime *= (1 + (Math.random()*2-1)*(stDef.variance/100));
 
-        // Sprawdzenie dostępności pracownika
         const wFlow = this.config.workerFlows.find(wf => wf.to === stationId);
         if (!wFlow) {
-            // Praca Automatyczna
-            stState.queue.shift();
-            stState.busySlots++;
+            stState.queue.shift(); stState.busySlots++;
             this.notifyUpstreamBuffers(stationId);
             const doneTime = this.calculateCompletionTime(this.simulationTime, opTime);
-            
-            this.recordStateChange(stationId, 'RUN', { 
-                part: part.code, 
-                startTime: this.simulationTime, 
-                endTime: doneTime, 
-                duration: doneTime - this.simulationTime, 
-                slotIndex: stState.busySlots - 1 
-            });
+            this.recordStateChange(stationId, 'RUN', { part: part.code, startTime: this.simulationTime, endTime: doneTime, duration: doneTime - this.simulationTime, slotIndex: stState.busySlots - 1 });
             this.scheduleEvent(doneTime, 'OPERATION_COMPLETE', { partId, stationId, poolId: null, requiredOperators: 0, duration: opTime });
             return;
         }
 
-        // Praca Manualna (wymaga pracownika)
         const pool = this.workerPools[wFlow.from];
         if (pool.request(part, requiredOps)) {
-            stState.queue.shift();
-            stState.busySlots++;
+            stState.queue.shift(); stState.busySlots++;
             this.notifyUpstreamBuffers(stationId);
-            
             part.updateState('WAITING_FOR_WORKER_TRAVEL', this.simulationTime);
             const travelT = (wFlow.distance / pool.speed) / 3600;
             const arrivalT = this.calculateCompletionTime(this.simulationTime, travelT);
-            
             this.recordWorkerTravel(wFlow.from, stationId, this.simulationTime, arrivalT);
             this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { startTime: this.simulationTime, endTime: arrivalT, slotIndex: stState.busySlots - 1 });
             this.scheduleEvent(arrivalT, 'WORKER_ARRIVES_AT_STATION', { partId, stationId, poolId: wFlow.from, requiredOperators: requiredOps });
         } else {
-            // Brak pracownika
             part.updateState('WAITING_FOR_WORKER', this.simulationTime);
             this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { startTime: this.simulationTime, slotIndex: stState.queue.length });
         }
@@ -977,10 +755,8 @@ class SimulationEngine {
         }
         if (stDef.variance > 0) opTime *= (1 + (Math.random()*2-1)*(stDef.variance/100));
 
-        // Symulacja Awarii
         if (stDef.failureProb > 0 && Math.random()*100 < stDef.failureProb) {
-            const repair = 1 + Math.random()*2;
-            opTime += repair;
+            const repair = 1 + Math.random()*2; opTime += repair;
             stState.breakdowns.push({ startTime: this.simulationTime, duration: repair });
             this.logMessage(`! AWARIA ${stDef.name}`);
             this.recordStateChange(stationId, 'STOP', { reason: 'AWARIA', startTime: this.simulationTime, endTime: this.simulationTime + repair });
@@ -1005,14 +781,12 @@ class SimulationEngine {
         stState.busySlots--;
         this.recordStateChange(stationId, 'IDLE');
 
-        // Zwolnienie zasobu ludzkiego
         if (poolId) {
             this.recordResourceUsage(poolId, 'PROCESSING', partId, this.simulationTime - duration, this.simulationTime, { stationId });
             const unblocked = this.workerPools[poolId].release(part, requiredOperators, duration);
             if (unblocked && unblocked.state === 'WAITING_FOR_WORKER') this.tryStartOperation(unblocked.currentLocation);
         }
 
-        // Kontrola Jakości (Scrap)
         if (stDef.type === 'jakosci' && Math.random() < ((stDef.failureProb||0)/1000 + 0.01)) {
             part.updateState('SCRAPPED', this.simulationTime);
             this.stats.partsScrapped++;
@@ -1022,18 +796,13 @@ class SimulationEngine {
 
         part.routingStep++;
         const nextOp = part.getNextOperation();
-        // Czy kolejna operacja na tej samej stacji?
         if (nextOp && stDef.allowedOps.some(op => op.id === nextOp.id)) {
-            stState.queue.unshift(partId); 
-            this.tryStartOperation(stationId); 
-            return;
+            stState.queue.unshift(partId); this.tryStartOperation(stationId); return;
         }
 
-        // Zwolniono miejsce - pobierz nowe zlecenie
         this.tryStartOperation(stationId);
         this.notifyUpstreamBuffers(stationId);
 
-        // Transport do następnego węzła
         const flow = this.config.flows.find(f => f.from === stationId);
         if (flow) {
             part.updateState('WAITING_FOR_TOOL', this.simulationTime);
