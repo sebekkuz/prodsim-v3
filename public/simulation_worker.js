@@ -4,7 +4,7 @@
 /**
  * PRODSIM v3 - SIMULATION ENGINE WORKER
  * ETAP 1 & 2: Fix Finansowy, Determinizm, Wizualizacja Strat, Integrity Check
- * FIX: Naprawa wizualizacji "?" oraz konfliktów slotów przy pracy równoległej.
+ * FIX V3: Naprawa ResourcePool (Double Decrement Bug) oraz pełne metadane przy WAITING.
  */
 
 // Import kolejki
@@ -123,8 +123,13 @@ class ResourcePool {
 
         if (this.waitQueue.length > 0) {
             const nextInQueue = this.waitQueue[0];
+            
+            // Sprawdzamy czy możemy obsłużyć oczekującego
             if (this.available >= nextInQueue.count) {
-                this.available -= nextInQueue.count;
+                // FIX: NIE odejmujemy 'available' tutaj!
+                // Zostanie to zrobione w metodzie request(), którą wywoła silnik po otrzymaniu unblocked entity.
+                // Jedynie usuwamy z kolejki, aby request() nie potraktował tego jako duplikatu/błędu.
+                
                 const unblocked = this.waitQueue.shift();
                 return unblocked.entity;
             }
@@ -776,11 +781,14 @@ class SimulationEngine {
             part.updateState('WAITING_FOR_WORKER', this.simulationTime);
             
             // FIX: Pełne metadane
+            // FIX V3: Dodano brakujące pola subCode i isAssembled, aby uniknąć "?"
             this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { 
                 part: part.code,
                 order: part.orderId,
+                subCode: part.code.includes('-') ? part.code.split('-').pop() : part.code,
+                isAssembled: part.attachedChildren.length > 0,
                 startTime: this.simulationTime, 
-                slotIndex: stState.busySlots // Czeka w kolejce, ale wizualnie pokazujemy to na slocie wirtualnym lub kolejce
+                slotIndex: stState.busySlots // Wizualizacja w kolejce
             });
         }
     }
