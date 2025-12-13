@@ -21,19 +21,19 @@ export const RealTimeViewer = ({ config, simulationData }) => {
     const lastTimestampRef = useRef(0);
     const containerRef = useRef(null);
 
-    // KOLORY STANÓW (ETAP 2: Rozszerzona paleta dla wizualizacji strat)
+    // KOLORY STANÓW (Wizualizacja Strat)
     const COLORS = {
         RUN: '#22c55e',      // Zielony (Praca - Wartość dodana)
         WAITING: '#f59e0b',  // Pomarańczowy (Oczekiwanie na pracownika/narzędzie - Muda)
         BLOCKED: '#ef4444',  // Czerwony (Zablokowane wyjście - Muda)
         OFFLINE: '#6b21a8',  // Fioletowy
         IDLE: '#e2e8f0',     // Szary
-        WORKER: '#3b82f6',   // Niebieski
+        WORKER: '#3b82f6',   // Niebieski (Pracownik na stacji)
+        WORKER_TRAVEL: '#60a5fa', // Jasnoniebieski (Pracownik w ruchu)
         PART_BODY: '#fff',
         PART_BORDER: '#333',
         ARROW_IDLE: '#facc15',
-        ARROW_ACTIVE: '#22c55e',
-        WORKER_PATH: '#60a5fa'
+        ARROW_ACTIVE: '#22c55e'
     };
 
     // === 1. PRZYGOTOWANIE DANYCH ===
@@ -158,57 +158,71 @@ export const RealTimeViewer = ({ config, simulationData }) => {
             if(from && to) drawFlowConnection(ctx, from, to, false, COLORS.ARROW_ACTIVE, COLORS.ARROW_IDLE);
         });
         
-        // --- LOGIKA STANU STACJI (FIX ETAP 2) ---
+        // --- LOGIKA STANU STACJI (NAPRAWA CAPACITY) ---
         const currentStationStatus = {};
         const partsInProcess = []; 
         const currentBufferStatus = {};
         
         config.stations.forEach(s => {
             const timeline = stationTimelines[s.id];
-            // Szukamy zdarzenia aktywnego w currentTimeVal
-            const activeEvent = timeline ? timeline.find(e => {
+            
+            // NAPRAWA: Zamiast .find() (tylko jeden), używamy .filter() by znaleźć WSZYSTKIE aktywne operacje
+            // Pozwala to na wyświetlenie 2 elementów na stacji z capacity: 2
+            const activeEvents = timeline ? timeline.filter(e => {
                 const startTime = e.meta?.startTime || e.time;
                 const endTime = e.meta?.endTime || (timeline.find(next => next.time > e.time)?.time) || (e.time + 0.1);
+                // Szukamy zdarzeń, które trwają w obecnym czasie
                 return currentTimeVal >= startTime && currentTimeVal < endTime;
-            }) : null;
+            }) : [];
 
-            let status = 'IDLE';
-            if (activeEvent) {
-                status = activeEvent.status; 
-                
-                // Renderuj część jeśli status to nie tylko RUN, ale też czekanie/blokada
+            // Określamy ogólny status stacji (dla koloru belki)
+            // Jeśli cokolwiek pracuje -> RUN, jeśli nie -> IDLE/inne
+            let mainStatus = 'IDLE';
+            if (activeEvents.length > 0) {
+                // Jeśli choć jeden element pracuje, stacja jest "aktywna"
+                if (activeEvents.some(e => e.status === 'RUN')) mainStatus = 'RUN';
+                else mainStatus = activeEvents[0].status; // np. WAITING
+            }
+            
+            currentStationStatus[s.id] = mainStatus;
+
+            // Renderowanie części na slotach
+            activeEvents.forEach(evt => {
+                const status = evt.status;
                 if (['RUN', 'BLOCKED', 'WAITING_FOR_WORKER', 'WAITING_FOR_TOOL'].includes(status)) {
                     const capacity = s.capacity || 1;
                     const stationBaseWidth = 120 + (Math.max(0, capacity - 1) * 80); 
                     const slotWidth = (stationBaseWidth - 10) / capacity;
                     
-                    const slotIdx = activeEvent.meta?.slotIndex !== undefined ? activeEvent.meta.slotIndex : 0;
+                    // Bezpieczne pobranie indexu slotu
+                    const slotIdx = (evt.meta?.slotIndex !== undefined) ? evt.meta.slotIndex : 0;
+                    
+                    // Obliczenie pozycji
                     const slotX = s.x + 5 + (slotIdx * slotWidth);
                     const slotY = s.y + 20;
                     
-                    // Kolor zależy od statusu (Wizualizacja Strat)
+                    // Kolor zależy od statusu
                     let partColor = COLORS.RUN;
                     if (status.includes('WAITING')) partColor = COLORS.WAITING; // Pomarańczowy
                     if (status === 'BLOCKED') partColor = COLORS.BLOCKED;     // Czerwony
 
                     partsInProcess.push({
-                        orderId: activeEvent.meta?.order || "?",
-                        partCode: activeEvent.meta?.part || "?",
-                        subCode: activeEvent.meta?.subCode || "?",
-                        isAssembled: activeEvent.meta?.isAssembled,
+                        orderId: evt.meta?.order || "?",
+                        partCode: evt.meta?.part || "?",
+                        subCode: evt.meta?.subCode || "?",
+                        isAssembled: evt.meta?.isAssembled,
                         x: slotX + slotWidth/2,
                         y: slotY + 25,
                         state: status,
-                        startTime: activeEvent.meta?.startTime,
-                        endTime: activeEvent.meta?.endTime,
-                        totalOps: activeEvent.meta?.totalOps,
-                        currentOp: activeEvent.meta?.currentOp,
+                        startTime: evt.meta?.startTime,
+                        endTime: evt.meta?.endTime,
+                        totalOps: evt.meta?.totalOps,
+                        currentOp: evt.meta?.currentOp,
                         width: slotWidth - 10,
                         color: partColor
                     });
                 }
-            }
-            currentStationStatus[s.id] = status;
+            });
         });
 
         config.buffers.forEach(b => {
@@ -283,7 +297,7 @@ export const RealTimeViewer = ({ config, simulationData }) => {
             });
         });
 
-        // --- TRANSPORT ---
+        // --- TRANSPORT (Materiał) ---
         transportEvents.forEach(evt => {
             if (currentTimeVal >= evt.startTime && currentTimeVal <= evt.endTime) {
                 const fromPos = getNodePos(evt.from); const toPos = getNodePos(evt.to);
@@ -302,9 +316,48 @@ export const RealTimeViewer = ({ config, simulationData }) => {
             }
         });
 
-        // --- PRACOWNICY ---
+        // --- RUCH PRACOWNIKA (Fix: Dodano pętlę renderowania) ---
+        workerTravelEvents.forEach(evt => {
+            // Renderujemy, jeśli pracownik jest w trakcie podróży
+            if (currentTimeVal >= evt.startTime && currentTimeVal <= evt.endTime) {
+                // Pobieramy pozycje
+                // from/to może być ID puli lub stacji
+                // Musimy znaleźć współrzędne
+                let fromPos = { x: 0, y: 0 };
+                let toPos = { x: 0, y: 0 };
+
+                const getEntityPos = (id) => {
+                    const wp = config.workerPools.find(p => p.id === id);
+                    if (wp) return { x: wp.x + 30, y: wp.y + 30 }; // Środek puli
+                    const s = config.stations.find(st => st.id === id);
+                    if (s) {
+                        // Jeśli stacja, celujemy w miejsce pracownika (pod maszyną)
+                        const w = 120 + (Math.max(0, (s.capacity || 1) - 1) * 80);
+                        return { x: s.x + w/2, y: s.y + 95 }; 
+                    }
+                    return { x: 0, y: 0 };
+                };
+
+                fromPos = getEntityPos(evt.from);
+                toPos = getEntityPos(evt.to);
+
+                if (fromPos.x !== 0 && toPos.x !== 0) {
+                    const duration = evt.endTime - evt.startTime;
+                    const progress = duration > 0 ? (currentTimeVal - evt.startTime) / duration : 1;
+                    
+                    const curX = fromPos.x + (toPos.x - fromPos.x) * progress;
+                    const curY = fromPos.y + (toPos.y - fromPos.y) * progress;
+
+                    // Rysuj kropkę pracownika
+                    drawWorkerCircle(ctx, curX, curY, COLORS.WORKER_TRAVEL);
+                }
+            }
+        });
+
+        // --- PRACOWNICY NA STACJACH ---
         const workersAtStations = {}; 
         config.stations.forEach(s => {
+            // Pracownik jest tam, gdzie status to RUN
             if (currentStationStatus[s.id] === 'RUN') {
                 const workerFlow = config.workerFlows?.find(wf => wf.to === s.id);
                 if (workerFlow) {
@@ -327,7 +380,7 @@ export const RealTimeViewer = ({ config, simulationData }) => {
         ctx.restore(); updateSidebars();
     }, [config, simulationData, currentTimeVal, viewState, stationTimelines, bufferTimelines, transportEvents]); 
 
-    // --- SIDEBAR UPDATE (Bez zmian logicznych) ---
+    // --- SIDEBAR UPDATE (bez zmian) ---
     const updateSidebars = () => {
         if (!simulationData?.orderReports) return;
         setCurrentShiftInfo(getShiftInfo(currentTimeVal));
@@ -344,7 +397,7 @@ export const RealTimeViewer = ({ config, simulationData }) => {
         setActiveOrders(active); setFinishedOrders(finished);
     };
     
-    // --- HELPERY RYSOWANIA (Bez zmian) ---
+    // --- HELPERY RYSOWANIA ---
     const bufferTableUpdate = {};
     const getNodePos = (id) => {
         const s = config.stations.find(n => n.id === id);

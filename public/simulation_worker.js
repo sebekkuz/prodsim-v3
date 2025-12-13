@@ -4,6 +4,7 @@
 /**
  * PRODSIM v3 - SIMULATION ENGINE WORKER
  * ETAP 1 & 2: Fix Finansowy, Determinizm, Wizualizacja Strat, Integrity Check
+ * FIX: Naprawa wizualizacji "?" oraz konfliktów slotów przy pracy równoległej.
  */
 
 // Import kolejki
@@ -617,6 +618,9 @@ class SimulationEngine {
         if (stState.busySlots >= (stDef.capacity || 1)) return;
         if (stState.queue.length > 0) { this.tryStartOperation(stationId); return; }
 
+        // FIX: Capacity Limit Check for Assembly Pull
+        if (stState.queue.length + stState.busySlots >= (stDef.capacity || 1)) return;
+
         const inputFlows = this.config.flows.filter(f => f.to === stationId);
         let parentPart = null;
         let parentBufferId = null;
@@ -731,7 +735,17 @@ class SimulationEngine {
             stState.queue.shift(); stState.busySlots++;
             this.notifyUpstreamBuffers(stationId);
             const doneTime = this.calculateCompletionTime(this.simulationTime, opTime);
-            this.recordStateChange(stationId, 'RUN', { part: part.code, startTime: this.simulationTime, endTime: doneTime, duration: doneTime - this.simulationTime, slotIndex: stState.busySlots - 1 });
+            
+            // FIX: Przekazujemy pełne dane (część, order, itp.) do metadanych
+            this.recordStateChange(stationId, 'RUN', { 
+                part: part.code, 
+                order: part.orderId,
+                subCode: part.code.includes('-') ? part.code.split('-').pop() : part.code,
+                startTime: this.simulationTime, 
+                endTime: doneTime, 
+                duration: doneTime - this.simulationTime, 
+                slotIndex: stState.busySlots - 1 
+            });
             this.scheduleEvent(doneTime, 'OPERATION_COMPLETE', { partId, stationId, poolId: null, requiredOperators: 0, duration: opTime });
             return;
         }
@@ -744,16 +758,35 @@ class SimulationEngine {
             const travelT = (wFlow.distance / pool.speed) / 3600;
             const arrivalT = this.calculateCompletionTime(this.simulationTime, travelT);
             this.recordWorkerTravel(wFlow.from, stationId, this.simulationTime, arrivalT);
-            this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { startTime: this.simulationTime, endTime: arrivalT, slotIndex: stState.busySlots - 1 });
-            this.scheduleEvent(arrivalT, 'WORKER_ARRIVES_AT_STATION', { partId, stationId, poolId: wFlow.from, requiredOperators: requiredOps });
+            
+            // FIX: Pełne metadane + slotIndex, żeby uniknąć "?"
+            const assignedSlot = stState.busySlots - 1;
+            this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { 
+                part: part.code,
+                order: part.orderId,
+                subCode: part.code.includes('-') ? part.code.split('-').pop() : part.code,
+                startTime: this.simulationTime, 
+                endTime: arrivalT, 
+                slotIndex: assignedSlot 
+            });
+            
+            // Przekazujemy slotIndex do handlera
+            this.scheduleEvent(arrivalT, 'WORKER_ARRIVES_AT_STATION', { partId, stationId, poolId: wFlow.from, requiredOperators: requiredOps, slotIndex: assignedSlot });
         } else {
             part.updateState('WAITING_FOR_WORKER', this.simulationTime);
-            this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { startTime: this.simulationTime, slotIndex: stState.queue.length });
+            
+            // FIX: Pełne metadane
+            this.recordStateChange(stationId, 'WAITING_FOR_WORKER', { 
+                part: part.code,
+                order: part.orderId,
+                startTime: this.simulationTime, 
+                slotIndex: stState.busySlots // Czeka w kolejce, ale wizualnie pokazujemy to na slocie wirtualnym lub kolejce
+            });
         }
     }
 
     handleWorkerArrives(payload) {
-        const { partId, stationId, poolId, requiredOperators } = payload;
+        const { partId, stationId, poolId, requiredOperators, slotIndex } = payload;
         const part = this.parts[partId];
         const stDef = this.config.stations.find(s => s.id === stationId);
         const stState = this.stationStates[stationId];
@@ -774,10 +807,13 @@ class SimulationEngine {
         }
 
         const doneTime = this.calculateCompletionTime(this.simulationTime, opTime);
+        
+        // FIX: Używamy przekazanego slotIndex, żeby nie nadpisywać innych
         this.recordStateChange(stationId, 'RUN', { 
             part: part.code, order: part.orderId, subCode: part.code.includes('-') ? part.code.split('-').pop() : part.code,
             isAssembled: part.attachedChildren.length > 0, startTime: this.simulationTime, endTime: doneTime, duration: doneTime - this.simulationTime,
-            slotIndex: stState.busySlots - 1, totalOps: part.routing.length, currentOp: part.routingStep + 1
+            slotIndex: slotIndex !== undefined ? slotIndex : stState.busySlots - 1, 
+            totalOps: part.routing.length, currentOp: part.routingStep + 1
         });
         this.scheduleEvent(doneTime, 'OPERATION_COMPLETE', { partId, stationId, poolId, requiredOperators, duration: opTime });
     }
