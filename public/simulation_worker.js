@@ -3,16 +3,15 @@
 
 /**
  * PRODSIM v3 - SIMULATION ENGINE WORKER
- * ======================================
- * ETAP 1.3: INTEGRITY CHECK
- * - Zabezpieczenie przed uruchomieniem symulacji na niespójnych danych.
+ * ETAP 1 & 2: Fix Finansowy, Determinizm, Wizualizacja Strat, Integrity Check
  */
 
+// Import kolejki
 try {
     importScripts('priority_queue.js');
 } catch (e) {
     console.error("Worker: Nie udało się załadować 'priority_queue.js'", e);
-    self.postMessage({ type: 'FATAL_ERROR', payload: ["Nie można załadować 'priority_queue.js'. Sprawdź pliki publiczne."] });
+    self.postMessage({ type: 'FATAL_ERROR', payload: ["Błąd ładowania priority_queue.js. Sprawdź folder public."] });
 }
 
 // === MODELE DANYCH ===
@@ -30,12 +29,21 @@ class Part {
         this.attachedChildren = [];
         this.state = 'CREATED';
         this.currentLocation = null;
+        
         this.creationTime = creationTime;
         this.finishTime = null;
         this.lastStateChangeTime = creationTime;
         this.dueDate = dueDate;
+        
+        // Koszt materiałowy (Etap 1: Fix Finansowy - będzie liczony też dla braków)
         this.materialCost = partType === 'PARENT' ? 100 : 20;
-        this.stats = { processingTime: 0, transportTime: 0, waitTime: 0, blockedTime: 0 };
+        
+        this.stats = {
+            processingTime: 0,
+            transportTime: 0,
+            waitTime: 0,
+            blockedTime: 0
+        };
     }
 
     updateState(newState, currentTime) {
@@ -72,18 +80,17 @@ class ResourcePool {
         this.available = capacity;
         this.waitQueue = [];
         this.engine = engine;
+        
         this.totalBusyTimeSeconds = 0;
         
-        // ETAP 2: Nowy licznik Idle Time
+        // ETAP 2: Śledzenie czasu bezczynności
         this.totalIdleTimeSeconds = 0;
         this.lastUpdateTime = 0;
     }
 
-    // ETAP 2: Metoda aktualizująca statystyki bezczynności
     updateStats(currentTime) {
         const duration = currentTime - this.lastUpdateTime;
         if (duration > 0) {
-            // Idle = (Dostępne zasoby) * czas
             const idleResources = this.available;
             this.totalIdleTimeSeconds += (idleResources * duration * 3600);
         }
@@ -91,10 +98,10 @@ class ResourcePool {
     }
 
     request(entity, count) {
-        // Aktualizuj statystyki przed zmianą stanu
         this.updateStats(this.engine.simulationTime);
         
         if (count > this.capacity) return false;
+        
         if (this.available >= count) {
             this.available -= count;
             return true;
@@ -146,12 +153,19 @@ class SimulationEngine {
         this.stationStates = {};
         this.replayEvents = [];
         this.orderMap = {};
-        this.stats = { partsProcessed: 0, partsScrapped: 0, cycleTimes: [], workInProcess: [], bottleneckSnapshots: [] };
+        this.stats = {
+            partsProcessed: 0,
+            partsScrapped: 0,
+            cycleTimes: [],
+            workInProcess: [],
+            bottleneckSnapshots: []
+        };
         this.shiftsConfig = {};
     }
 
     logMessage(msg) { this.log.push(msg); }
 
+    // Rejestracja zdarzeń (Etap 2: Dodano statusy WAITING/BLOCKED)
     recordStateChange(stationId, status, meta = {}) {
         this.replayEvents.push({ type: 'STATION_STATE', time: this.simulationTime, stationId, status, meta });
     }
@@ -245,8 +259,6 @@ class SimulationEngine {
         } catch (e) { return 0; }
     }
 
-    // --- URUCHAMIANIE SYMULACJI (RUN) ---
-
     runSimulation(config, db, mrp, settings) {
         this.reset();
         this.config = config;
@@ -255,50 +267,24 @@ class SimulationEngine {
         this.settings = settings || { startDate: '18-11-2025' };
         this.shiftsConfig = this.settings.shifts || {};
 
-        // === ETAP 1.3: INTEGRITY CHECK (WALIDACJA DANYCH) ===
-        // To jest kluczowy moment. Zanim puścimy pętlę, sprawdzamy czy mamy komplet danych.
-        // Jeśli brakuje marszruty dla produktu z MRP, silnik zatrzyma się z błędem.
-        
+        // ETAP 1.3: INTEGRITY CHECK
         const validationErrors = [];
-        
-        // Iterujemy po wszystkich zleceniach
         this.mrp.forEach(order => {
-            if (!order['Sekcje'] || !order['Rozmiar']) return; // Pomiń puste wiersze
-            
-            // Parsujemy strukturę produktu, żeby wiedzieć czego szukać w bazie marszrut
+            if (!order['Sekcje'] || !order['Rozmiar']) return;
             const bom = this.parseOrderString(order['Sekcje'], order['Rozmiar']);
-            
             bom.forEach(parentBOM => {
-                // Generujemy klucz marszruty dla głównego komponentu (obudowy)
-                // Format klucza musi zgadzać się z tym w ModuleRouting / config.routings
-                const routingKey = `casings_${parentBOM.size}_${parentBOM.code}_phase0`;
-                
-                if (!this.config.routings[routingKey]) {
-                    validationErrors.push(
-                        `BŁĄD DANYCH: Brak zdefiniowanej marszruty dla "${routingKey}" (Zlecenie: ${order['Zlecenie'] || '?'})`
-                    );
-                }
-                
-                // Opcjonalnie: można też sprawdzać marszruty montażowe (phase1)
-                // const assemblyKey = `casings_${parentBOM.size}_${parentBOM.code}_phase1`;
-                // if (!this.config.routings[assemblyKey]) validationErrors.push(`Ostrzeżenie: Brak montażu dla ${assemblyKey}`);
+                const rKey = `casings_${parentBOM.size}_${parentBOM.code}_phase0`;
+                if (!this.config.routings[rKey]) validationErrors.push(`Brak marszruty dla: ${rKey} (Zl: ${order['Zlecenie']})`);
             });
         });
 
         if (validationErrors.length > 0) {
-            this.logMessage("!!! PRZERWANO: Wykryto błędy integralności danych:");
-            // Pokaż pierwsze 10 błędów, żeby nie zaspamować logu
-            validationErrors.slice(0, 10).forEach(e => this.logMessage(e));
-            if (validationErrors.length > 10) {
-                this.logMessage(`...oraz ${validationErrors.length - 10} innych błędów.`);
-            }
-            this.logMessage("Napraw konfigurację marszrut lub plik MRP i spróbuj ponownie.");
-            
-            // Zwracamy tablicę z komunikatem błędu, co zatrzyma worker
-            return ["FATAL: Błędy danych. Sprawdź log symulacji."];
+            this.logMessage("!!! BŁĄD DANYCH (Integrity Check):");
+            validationErrors.slice(0, 5).forEach(e => this.logMessage(e));
+            return ["Symulacja przerwana. Brak marszrut dla zleceń."];
         }
-        // === KONIEC WALIDACJI ===
 
+        // Init
         this.config.buffers.forEach(buffer => { 
             this.bufferStates[buffer.id] = { queue: [], maxQueue: 0, sumQueue: 0, queueSamples: 0 }; 
         });
@@ -364,8 +350,7 @@ class SimulationEngine {
             
             if (timeDelta > 0 && this.isWorkingTime(this.simulationTime)) {
                  this.updateStarvationStats(timeDelta);
-                 
-                 // ETAP 2: Aktualizacja statystyk Idle Time dla zasobów
+                 // ETAP 2: Update Idle Time
                  [...Object.values(this.workerPools), ...Object.values(this.toolPools)].forEach(p => p.updateStats(event.time));
             }
             
@@ -411,7 +396,6 @@ class SimulationEngine {
     finalizeSimulation() {
         const duration = this.simulationTime;
         const workingHoursTotal = this.calculateWorkingHoursDuration(duration);
-        
         const processedParts = Object.values(this.parts).filter(p => p.state === 'FINISHED');
         const count = processedParts.length;
         
@@ -429,19 +413,23 @@ class SimulationEngine {
                 transport: processedParts.reduce((s,p) => s + p.stats.transportTime, 0) / count,
                 wait: processedParts.reduce((s,p) => s + p.stats.waitTime, 0) / count,
                 blocked: processedParts.reduce((s,p) => s + p.stats.blockedTime, 0) / count
-        let totalLaborCost = 0;
-        let totalEnergyCost = 0;
+            };
+        }
+        
+        // ETAP 1 FIX: CPU uwzględnia SCRAP
+        const materialConsumedParts = Object.values(this.parts).filter(p => p.state === 'FINISHED' || p.state === 'SCRAPPED');
+        const totalMaterialCost = materialConsumedParts.reduce((sum, p) => sum + p.materialCost, 0);
+
+        let totalLaborCost = 0, totalEnergyCost = 0;
         const workerStats = [];
 
         [...Object.values(this.workerPools), ...Object.values(this.toolPools)].forEach(pool => {
             const rate = pool.costPerHour || 0;
             const paidHours = workingHoursTotal * pool.capacity;
             const attendanceCost = paidHours * rate;
-            
             const hoursWorked = pool.totalBusyTimeSeconds / 3600;
             const utilizedCost = hoursWorked * rate;
-            
-            // ETAP 2: Czas bezczynności (Idle) w roboczogodzinach
+            // ETAP 2: Idle
             const idleHours = pool.totalIdleTimeSeconds / 3600;
 
             totalLaborCost += utilizedCost; 
@@ -452,7 +440,7 @@ class SimulationEngine {
                 capacity: pool.capacity,
                 utilization: paidHours > 0 ? (hoursWorked / paidHours * 100).toFixed(1) : 0,
                 hoursWorked: hoursWorked.toFixed(1),
-                idleHours: idleHours.toFixed(1), // Nowa kolumna w raporcie
+                idleHours: idleHours.toFixed(1),
                 attendanceCost: attendanceCost.toFixed(2)
             });
         });
@@ -472,7 +460,6 @@ class SimulationEngine {
 
             const utilization = totalCapacityTime > 0 ? (totalBusy / totalCapacityTime * 100) : 0;
             const starvation = totalCapacityTime > 0 ? (state.totalStarvedTime / totalCapacityTime * 100) : 0;
-            
             const downtime = state.breakdowns.reduce((s,b) => s+b.duration, 0);
             let blocked = 100 - utilization - starvation - ((downtime/totalCapacityTime)*100);
             if(blocked < 0) blocked = 0;
