@@ -73,10 +73,27 @@ class ResourcePool {
         this.waitQueue = [];
         this.engine = engine;
         this.totalBusyTimeSeconds = 0;
-        // Idle Time dodamy w Etapie 2
+        
+        // ETAP 2: Nowy licznik Idle Time
+        this.totalIdleTimeSeconds = 0;
+        this.lastUpdateTime = 0;
+    }
+
+    // ETAP 2: Metoda aktualizująca statystyki bezczynności
+    updateStats(currentTime) {
+        const duration = currentTime - this.lastUpdateTime;
+        if (duration > 0) {
+            // Idle = (Dostępne zasoby) * czas
+            const idleResources = this.available;
+            this.totalIdleTimeSeconds += (idleResources * duration * 3600);
+        }
+        this.lastUpdateTime = currentTime;
     }
 
     request(entity, count) {
+        // Aktualizuj statystyki przed zmianą stanu
+        this.updateStats(this.engine.simulationTime);
+        
         if (count > this.capacity) return false;
         if (this.available >= count) {
             this.available -= count;
@@ -89,9 +106,13 @@ class ResourcePool {
     }
 
     release(entityReleasing, count, busyTimeDuration = 0) {
+        this.updateStats(this.engine.simulationTime);
+        
         this.available += count;
         if (this.available > this.capacity) this.available = this.capacity;
+        
         this.totalBusyTimeSeconds += (busyTimeDuration * 3600 * count);
+
         if (this.waitQueue.length > 0) {
             const nextInQueue = this.waitQueue[0];
             if (this.available >= nextInQueue.count) {
@@ -343,6 +364,9 @@ class SimulationEngine {
             
             if (timeDelta > 0 && this.isWorkingTime(this.simulationTime)) {
                  this.updateStarvationStats(timeDelta);
+                 
+                 // ETAP 2: Aktualizacja statystyk Idle Time dla zasobów
+                 [...Object.values(this.workerPools), ...Object.values(this.toolPools)].forEach(p => p.updateStats(event.time));
             }
             
             this.simulationTime = event.time;
@@ -405,22 +429,21 @@ class SimulationEngine {
                 transport: processedParts.reduce((s,p) => s + p.stats.transportTime, 0) / count,
                 wait: processedParts.reduce((s,p) => s + p.stats.waitTime, 0) / count,
                 blocked: processedParts.reduce((s,p) => s + p.stats.blockedTime, 0) / count
-            };
-        }
-        
-        const materialConsumedParts = Object.values(this.parts).filter(p => p.state === 'FINISHED' || p.state === 'SCRAPPED');
-        const totalMaterialCost = materialConsumedParts.reduce((sum, p) => sum + p.materialCost, 0);
-
-        let totalLaborCost = 0, totalEnergyCost = 0;
+        let totalLaborCost = 0;
+        let totalEnergyCost = 0;
         const workerStats = [];
 
         [...Object.values(this.workerPools), ...Object.values(this.toolPools)].forEach(pool => {
             const rate = pool.costPerHour || 0;
             const paidHours = workingHoursTotal * pool.capacity;
             const attendanceCost = paidHours * rate;
+            
             const hoursWorked = pool.totalBusyTimeSeconds / 3600;
             const utilizedCost = hoursWorked * rate;
             
+            // ETAP 2: Czas bezczynności (Idle) w roboczogodzinach
+            const idleHours = pool.totalIdleTimeSeconds / 3600;
+
             totalLaborCost += utilizedCost; 
             
             workerStats.push({
@@ -429,6 +452,7 @@ class SimulationEngine {
                 capacity: pool.capacity,
                 utilization: paidHours > 0 ? (hoursWorked / paidHours * 100).toFixed(1) : 0,
                 hoursWorked: hoursWorked.toFixed(1),
+                idleHours: idleHours.toFixed(1), // Nowa kolumna w raporcie
                 attendanceCost: attendanceCost.toFixed(2)
             });
         });
