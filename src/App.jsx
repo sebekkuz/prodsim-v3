@@ -1,155 +1,165 @@
 import React, { useState } from 'react';
-import { AppProvider, useApp } from './context/AppContext';
-import { SimulationLogViewer } from './components/SharedComponents';
+import { AppProvider } from './context/AppContext';
 
-// Import Modułów
+// Importy Modułów (Teraz pliki istnieją, więc błąd zniknie)
 import ModuleImport from './components/ModuleImport';
 import ModuleRouting from './components/ModuleRouting';
-import ModuleVisualization from './components/ModuleVisualization';
-import ModuleValidator from './components/ModuleValidator';
 import ModuleSimulation from './components/ModuleSimulation';
 import ModuleResults from './components/ModuleResults';
-import { RealTimeViewer } from './components/RealTimeViewer';
-import { GanttViewer } from './components/GanttViewer';
+import ModuleValidator from './components/ModuleValidator';
 
-// Ikony Lucide
+// Import ikon
 import { 
-  FolderInput, Map, Factory, FileSearch, Settings, 
-  BarChart3, Activity, CalendarDays, Menu, Bell, User, Search, ChevronRight 
+  LayoutDashboard, 
+  Settings, 
+  FileInput, 
+  Network, 
+  Activity, 
+  BarChart3, 
+  CheckCircle, 
+  Menu, 
+  ChevronLeft,
+  Search,
+  User,
+  Box
 } from 'lucide-react';
 
-const AppContent = () => {
-    const { activeModule, setActiveModule, simulationLog, simulationConfig, simulationResults } = useApp();
-    const [sidebarOpen, setSidebarOpen] = useState(true);
-    
-    const modules = [ 
-        { id: 'import', name: 'Import/Eksport', icon: <FolderInput size={20} /> }, 
-        { id: 'marszruty', name: 'Marszruty', icon: <Map size={20} /> }, 
-        { id: 'wizualizacja', name: 'Konfiguracja Linii', icon: <Factory size={20} /> }, 
-        { id: 'validator', name: 'Audyt Gemini', icon: <FileSearch size={20} /> }, 
-        { id: 'symulacja', name: 'Ustawienia Symulacji', icon: <Settings size={20} /> }, 
-        { id: 'wyniki', name: 'Wyniki i KPI', icon: <BarChart3 size={20} /> }, 
-        { id: 'realtime', name: 'Real-time Flow', icon: <Activity size={20} /> }, 
-        { id: 'gantt', name: 'Harmonogram', icon: <CalendarDays size={20} /> },
-    ];
-    
-    const renderModule = () => {
-        const ModuleWrapper = ({ children }) => (
-            <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-sm border border-slate-200 p-6 h-full overflow-auto">
-                {children}
+function App() {
+  const [activeTab, setActiveTab] = useState('import');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const navItems = [
+    { id: 'import', label: 'Konfiguracja', icon: FileInput },
+    { id: 'routing', label: 'Marszruty', icon: Network },
+    { id: 'simulation', label: 'Symulacja', icon: Activity },
+    { id: 'results', label: 'Wyniki', icon: BarChart3 },
+    { id: 'validator', label: 'Walidator', icon: CheckCircle },
+  ];
+
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'import':
+        return <ModuleImport />;
+      case 'routing':
+        return <ModuleRouting />;
+      case 'simulation':
+        return <ModuleSimulation />;
+      case 'results':
+        return <ModuleResults />;
+      case 'validator':
+        return <ModuleValidator />;
+      default:
+        return <ModuleImport />;
+    }
+  };
+
+  return (
+    <AppProvider>
+      <div className="flex h-screen w-full bg-slate-50 overflow-hidden text-slate-600 font-sans">
+        
+        {/* LEWY SIDEBAR */}
+        <aside 
+          className={`
+            flex-shrink-0 bg-white border-r border-slate-200 z-20 transition-all duration-300 flex flex-col
+            ${sidebarOpen ? 'w-64' : 'w-20'}
+          `}
+        >
+          <div className="h-16 flex items-center justify-center border-b border-slate-100">
+            <div className="flex items-center gap-3 text-blue-600">
+              <div className="p-2 bg-blue-50 rounded-lg">
+                <Box size={24} />
+              </div>
+              {sidebarOpen && (
+                <span className="font-bold text-xl tracking-tight text-slate-800">
+                  ProdSim<span className="text-blue-600">V3</span>
+                </span>
+              )}
             </div>
-        );
+          </div>
 
-        switch (activeModule) {
-            case 'import': return <ModuleWrapper><ModuleImport /></ModuleWrapper>;
-            case 'marszruty': return <ModuleWrapper><ModuleRouting /></ModuleWrapper>;
-            case 'wizualizacja': return <ModuleVisualization />; // Canvas ma własny kontener
-            case 'validator': return <ModuleWrapper><ModuleValidator /></ModuleWrapper>; 
-            case 'symulacja': return <ModuleWrapper><ModuleSimulation /></ModuleWrapper>;
-            case 'wyniki': return <ModuleWrapper><ModuleResults /></ModuleWrapper>;
-            case 'realtime': return <RealTimeViewer config={simulationConfig} simulationData={simulationResults} />;
-            case 'gantt': return <GanttViewer config={simulationConfig} simulationData={simulationResults} />;
-            default: return <div className="flex items-center justify-center h-full text-slate-400">Wybierz moduł z menu</div>;
-        }
-    };
-
-    const activeModuleName = modules.find(m => m.id === activeModule)?.name;
-    
-    return (
-        <div className="flex h-screen bg-slate-50 text-slate-600 font-sans overflow-hidden">
-            {/* LEWY SIDEBAR */}
-            <aside className={`${sidebarOpen ? 'w-64' : 'w-20'} bg-white border-r border-slate-200 flex flex-col transition-all duration-300 z-30 shadow-lg`}>
-                <div className="h-16 flex items-center justify-between px-4 border-b border-slate-100">
-                    {sidebarOpen && <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">ProdSim v3</h1>}
-                    <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-                        <Menu size={20} />
-                    </button>
-                </div>
-
-                <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
-                    {modules.map(mod => ( 
-                        <button 
-                            key={mod.id} 
-                            onClick={() => setActiveModule(mod.id)} 
-                            className={`flex items-center w-full px-3 py-3 rounded-xl transition-all duration-200 group
-                                ${activeModule === mod.id 
-                                    ? 'bg-blue-50 text-blue-700 shadow-sm ring-1 ring-blue-200' 
-                                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'
-                                }`}
-                        > 
-                            <span className={`${activeModule === mod.id ? 'text-blue-600' : 'text-slate-400 group-hover:text-slate-600'}`}>
-                                {mod.icon}
-                            </span> 
-                            {sidebarOpen && <span className="ml-3 text-sm font-medium whitespace-nowrap">{mod.name}</span>}
-                            {activeModule === mod.id && sidebarOpen && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-blue-500" />}
-                        </button> 
-                    ))}
-                </nav>
-
-                <div className="p-4 border-t border-slate-100">
-                    <div className={`flex items-center ${!sidebarOpen && 'justify-center'}`}>
-                        <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-xs">
-                            JS
-                        </div>
-                        {sidebarOpen && (
-                            <div className="ml-3">
-                                <p className="text-sm font-medium text-slate-900">Jan Szczepanik</p>
-                                <p className="text-xs text-slate-400">Inżynier Procesu</p>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </aside>
-
-            {/* GŁÓWNA ZAWARTOŚĆ */}
-            <div className="flex-1 flex flex-col min-w-0 bg-dot-pattern">
-                {/* TOP HEADER */}
-                <header className="h-16 bg-white/80 backdrop-blur-md border-b border-slate-200 flex items-center justify-between px-6 sticky top-0 z-20">
-                    <div className="flex items-center text-sm text-slate-500">
-                        <span>Symulacja</span>
-                        <ChevronRight size={14} className="mx-2" />
-                        <span className="font-medium text-slate-900">{activeModuleName}</span>
-                    </div>
-
-                    <div className="flex items-center space-x-4">
-                        <div className="hidden md:flex items-center bg-slate-100 rounded-lg px-3 py-1.5">
-                            <Search size={16} className="text-slate-400 mr-2" />
-                            <input type="text" placeholder="Szukaj..." className="bg-transparent border-none focus:ring-0 text-sm w-48 text-slate-700 placeholder:text-slate-400" />
-                        </div>
-                        <button className="p-2 text-slate-400 hover:text-slate-600 relative">
-                            <Bell size={20} />
-                            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span>
-                        </button>
-                    </div>
-                </header>
-
-                {/* OBSZAR ROBOCZY */}
-                <main className="flex-1 overflow-hidden relative p-4 md:p-6 flex flex-col">
-                    {renderModule()}
-                </main>
+          <nav className="flex-1 py-6 px-3 space-y-2 overflow-y-auto">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id)}
+                title={!sidebarOpen ? item.label : ''}
+                className={`
+                  w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 group
+                  ${activeTab === item.id 
+                    ? 'bg-blue-50 text-blue-700 shadow-sm font-medium' 
+                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}
+                `}
+              >
+                <item.icon 
+                  size={20} 
+                  className={activeTab === item.id ? 'text-blue-600' : 'text-slate-400 group-hover:text-slate-600'} 
+                />
                 
-                {/* FOOTER / TIMELINE */}
-                {(activeModule !== 'realtime' && activeModule !== 'gantt') && (
-                    <div className="h-48 bg-white border-t border-slate-200 shrink-0 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-                        <div className="h-full overflow-hidden flex flex-col">
-                            <div className="px-4 py-2 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-                                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Logi Systemowe</span>
-                            </div>
-                            <div className="flex-1 overflow-auto p-0">
-                                <SimulationLogViewer log={simulationLog} />
-                            </div>
-                        </div>
-                    </div>
+                {sidebarOpen && <span>{item.label}</span>}
+                
+                {activeTab === item.id && sidebarOpen && (
+                  <div className="ml-auto w-1.5 h-1.5 rounded-full bg-blue-600" />
                 )}
-            </div>
-        </div>
-    );
-};
+              </button>
+            ))}
+          </nav>
 
-export default function App() {
-    return (
-        <AppProvider>
-            <AppContent />
-        </AppProvider>
-    );
+          <div className="p-4 border-t border-slate-100">
+            <button 
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="w-full flex items-center justify-center p-2 rounded-lg hover:bg-slate-100 text-slate-400 transition-colors"
+            >
+              {sidebarOpen ? (
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <ChevronLeft size={18} />
+                  <span>Zwiń panel</span>
+                </div>
+              ) : (
+                <Menu size={20} />
+              )}
+            </button>
+          </div>
+        </aside>
+
+        {/* GŁÓWNY OBSZAR ROBOCZY */}
+        <main className="flex-1 flex flex-col relative min-w-0">
+          
+          <header className="h-16 flex-shrink-0 bg-white/80 backdrop-blur-md border-b border-slate-200 flex items-center justify-between px-6 z-10 sticky top-0">
+            <div className="flex items-center gap-2 text-sm text-slate-500">
+              <span className="text-slate-400">Aplikacja</span>
+              <span className="text-slate-300">/</span>
+              <span className="font-semibold text-slate-800 flex items-center gap-2">
+                {navItems.find(i => i.id === activeTab)?.label}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="relative hidden md:block group">
+                 <input 
+                   type="text" 
+                   placeholder="Szukaj w projekcie..." 
+                   className="pl-9 pr-4 py-1.5 bg-slate-100 border-none rounded-lg text-sm focus:ring-2 focus:ring-blue-500/20 w-48 transition-all focus:w-64 focus:bg-white border-transparent focus:border-slate-200" 
+                 />
+                 <div className="absolute left-2.5 top-1.5 text-slate-400">
+                   <Search size={16} />
+                 </div>
+              </div>
+              <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/30 cursor-pointer hover:scale-105 transition-transform">
+                <User size={16} />
+              </div>
+            </div>
+          </header>
+
+          <div className="flex-1 overflow-auto bg-slate-50 bg-dot-pattern relative">
+            <div className="p-6 max-w-[1920px] mx-auto min-h-full">
+              {renderContent()}
+            </div>
+          </div>
+
+        </main>
+      </div>
+    </AppProvider>
+  );
 }
+
+export default App;
