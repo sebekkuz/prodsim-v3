@@ -11,8 +11,10 @@ export const VisualizationCanvas = () => {
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [isPanning, setIsPanning] = useState(false);
     const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
-    const nodeWidth = 110;
-    const nodeHeight = 70;
+    
+    // Zwiększamy nieco węzły, aby pasowały do stylu "Card"
+    const nodeWidth = 140;
+    const nodeHeight = 80;
 
     const getIcon = (type, isBuffer = false) => {
         if (isBuffer) return "📥";
@@ -36,21 +38,25 @@ export const VisualizationCanvas = () => {
     const drawCanvas = (ctx, canvas) => {
         const width = canvas.width;
         const height = canvas.height;
-        ctx.fillStyle = "#f9f9f9";
-        ctx.fillRect(0, 0, width, height);
+        
+        // Tło Canvasu - przezroczyste, bo mamy tło w kropki w MainLayout
+        ctx.clearRect(0, 0, width, height);
+        
         ctx.save();
         ctx.translate(viewOffset.x, viewOffset.y);
         ctx.scale(zoom, zoom);
         
-        // Grid
+        // Rysowanie Gridu (siatki) - delikatniejszy
         ctx.beginPath();
-        ctx.strokeStyle = "#e5e7eb";
+        ctx.strokeStyle = "rgba(203, 213, 225, 0.4)"; // slate-300 z alpha
         ctx.lineWidth = 1;
         const gridSize = 50;
         const startX = Math.floor(-viewOffset.x / zoom / gridSize) * gridSize;
         const startY = Math.floor(-viewOffset.y / zoom / gridSize) * gridSize;
         const endX = startX + (width / zoom) + gridSize;
         const endY = startY + (height / zoom) + gridSize;
+        
+        // Opcjonalnie: kropki zamiast linii dla lżejszego wyglądu
         for (let x = startX; x < endX; x += gridSize) { ctx.moveTo(x, -10000); ctx.lineTo(x, 10000); }
         for (let y = startY; y < endY; y += gridSize) { ctx.moveTo(-10000, y); ctx.lineTo(10000, y); }
         ctx.stroke();
@@ -65,71 +71,140 @@ export const VisualizationCanvas = () => {
             ctx.lineWidth = 2;
             ctx.setLineDash(dash || []);
             const midX = fromX + (toX - fromX) / 2;
+            
+            // Rysowanie linii łamanej
             ctx.moveTo(fromX, fromY);
             ctx.lineTo(midX, fromY);
             ctx.lineTo(midX, toY);
             ctx.lineTo(toX, toY);
             ctx.stroke();
+            
+            // Grot strzałki
             const headlen = 8;
             ctx.beginPath();
             ctx.moveTo(toX, toY);
             if (fromX < toX) { ctx.lineTo(toX - headlen, toY - headlen/2); ctx.lineTo(toX - headlen, toY + headlen/2); } else { ctx.lineTo(toX + headlen, toY - headlen/2); ctx.lineTo(toX + headlen, toY + headlen/2); }
             ctx.fill();
+            
+            // Etykieta na linii
             if (label) {
                 const labelX = midX;
                 const labelY = fromY + (toY - fromY) / 2;
-                ctx.font = "10px Arial";
-                const textWidth = ctx.measureText(label).width + 6;
-                const textHeight = 14;
+                ctx.font = "10px Inter, sans-serif";
+                const textWidth = ctx.measureText(label).width + 8;
+                const textHeight = 16;
+                
+                // Tło etykiety (Pill shape)
                 ctx.fillStyle = "white";
-                ctx.fillRect(labelX - textWidth/2, labelY - textHeight/2, textWidth, textHeight);
-                ctx.lineWidth = 1;
-                ctx.strokeRect(labelX - textWidth/2, labelY - textHeight/2, textWidth, textHeight);
-                ctx.fillStyle = "black";
+                ctx.beginPath();
+                ctx.roundRect(labelX - textWidth/2, labelY - textHeight/2, textWidth, textHeight, 4);
+                ctx.fill();
+                ctx.strokeStyle = "#e2e8f0";
+                ctx.stroke();
+                
+                ctx.fillStyle = "#64748b"; // slate-500
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
                 ctx.fillText(label, labelX, labelY);
             }
         };
 
+        // Rysowanie przepływów (Flows)
         flows.forEach(flow => {
             const fromNode = nodePositions.get(flow.from); const toNode = nodePositions.get(flow.to); if (!fromNode || !toNode) return;
             const startX = fromNode.x + nodeWidth; const startY = fromNode.y + nodeHeight / 2; const endX = toNode.x; const endY = toNode.y + nodeHeight / 2;
-            drawOrthogonalArrow(startX, startY, endX, endY, "#6b7280", [], `${flow.distance}m`);
+            drawOrthogonalArrow(startX, startY, endX, endY, "#94a3b8", [], `${flow.distance}m`); // slate-400
         });
 
+        // Rysowanie ścieżek pracowników
         workerFlows.forEach(flow => {
             const fromNode = nodePositions.get(flow.from); const toNode = nodePositions.get(flow.to); if (!fromNode || !toNode) return;
             const startX = fromNode.x + nodeWidth / 2; const startY = fromNode.y + nodeHeight; const endX = toNode.x + nodeWidth / 2; const endY = toNode.y;
-            ctx.beginPath(); ctx.strokeStyle = "#f59e0b"; ctx.setLineDash([5, 5]);
+            ctx.beginPath(); ctx.strokeStyle = "#f59e0b"; ctx.setLineDash([5, 5]); // amber-500
             const midY = startY + (endY - startY) / 2; ctx.moveTo(startX, startY); ctx.lineTo(startX, midY); ctx.lineTo(endX, midY); ctx.lineTo(endX, endY); ctx.stroke();
-            ctx.fillStyle = "white"; ctx.fillRect(endX + 5, midY - 7, 30, 14); ctx.fillStyle = "black"; ctx.font = "9px Arial"; ctx.fillText(`${flow.distance}m`, endX + 20, midY);
+            // Mała etykieta
+            ctx.fillStyle = "#fffbeb"; // amber-50
+            ctx.fillRect(endX + 5, midY - 7, 30, 14); 
+            ctx.fillStyle = "#d97706"; ctx.font = "9px Inter, sans-serif"; ctx.fillText(`${flow.distance}m`, endX + 20, midY);
         });
 
+        // Funkcja pomocnicza do zawijania tekstu
         const wrapText = (ctx, text, x, y, maxWidth, lineHeight) => {
-            const words = text.split(' '); let line = ''; let testLine = ''; let lineArray = [];
-            for(let n = 0; n < words.length; n++) { testLine = line + words[n] + ' '; const metrics = ctx.measureText(testLine); const testWidth = metrics.width; if (testWidth > maxWidth && n > 0) { lineArray.push(line); line = words[n] + ' '; } else { line = testLine; } }
+            const words = text.split(' '); let line = ''; let lineArray = [];
+            for(let n = 0; n < words.length; n++) { 
+                const testLine = line + words[n] + ' '; 
+                const metrics = ctx.measureText(testLine); 
+                const testWidth = metrics.width; 
+                if (testWidth > maxWidth && n > 0) { lineArray.push(line); line = words[n] + ' '; } else { line = testLine; } 
+            }
             lineArray.push(line);
             const totalHeight = lineArray.length * lineHeight; let startY = y - (totalHeight / 2) + (lineHeight / 1.5); 
             lineArray.forEach((l, i) => { ctx.fillText(l, x, startY + (i * lineHeight)); });
         };
 
+        // Rysowanie Węzłów (Nodes)
         ctx.setLineDash([]);
         allNodes.forEach(node => {
-            ctx.fillStyle = "white"; ctx.shadowBlur = 10; ctx.shadowColor = "rgba(0,0,0,0.1)";
-            let borderColor = "#9ca3af";
-            if (node.type === 'station') borderColor = "#3b82f6";
-            else if (node.type === 'buffer') borderColor = node.isStartBuffer ? "#10b981" : (node.isEndBuffer ? "#ef4444" : "#eab308");
-            else if (node.type === 'workerPool') borderColor = "#f59e0b";
-            ctx.strokeStyle = borderColor; ctx.lineWidth = 2;
-            ctx.fillRect(node.x, node.y, nodeWidth, nodeHeight); ctx.shadowBlur = 0; ctx.strokeRect(node.x, node.y, nodeWidth, nodeHeight);
-            ctx.font = "16px Arial"; ctx.fillStyle = "black"; ctx.textAlign = "left"; ctx.fillText(node.icon, node.x + 5, node.y + 20);
-            ctx.font = "bold 9px Arial"; ctx.fillStyle = borderColor; ctx.textAlign = "right";
+            // Shadow
+            ctx.shadowColor = "rgba(0, 0, 0, 0.05)";
+            ctx.shadowBlur = 15;
+            ctx.shadowOffsetY = 4;
+
+            // Ustalenie kolorów stylu Digital Twin
+            let strokeStyle = "#e2e8f0"; // slate-200 default
+            let headerColor = "#f8fafc"; // slate-50
+            let badgeColor = "#e2e8f0";
+
+            if (node.type === 'station') { strokeStyle = "#3b82f6"; headerColor = "#eff6ff"; badgeColor = "#dbeafe"; } // blue-500/50
+            else if (node.type === 'buffer') { strokeStyle = "#cbd5e1"; headerColor = "#f8fafc"; badgeColor = "#f1f5f9"; }
+            else if (node.type === 'workerPool') { strokeStyle = "#f59e0b"; headerColor = "#fffbeb"; badgeColor = "#fef3c7"; }
+
+            // Główny prostokąt (Karta)
+            ctx.fillStyle = "white";
+            if (ctx.roundRect) {
+                ctx.beginPath();
+                ctx.roundRect(node.x, node.y, nodeWidth, nodeHeight, 12); // Rounded corners 12px
+                ctx.fill();
+                ctx.shadowColor = "transparent"; // Reset shadow for stroke
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = strokeStyle;
+                ctx.stroke();
+            } else {
+                ctx.fillRect(node.x, node.y, nodeWidth, nodeHeight);
+                ctx.strokeRect(node.x, node.y, nodeWidth, nodeHeight);
+            }
+
+            // Header pasek (opcjonalny, np. dla Stacji)
+            /* ctx.fillStyle = headerColor;
+            ctx.beginPath();
+            ctx.roundRect(node.x + 2, node.y + 2, nodeWidth - 4, 24, {upperLeft: 10, upperRight: 10});
+            ctx.fill();
+            */
+
+            // Ikona
+            ctx.font = "20px Arial"; 
+            ctx.fillStyle = "black"; 
+            ctx.textAlign = "left"; 
+            ctx.fillText(node.icon, node.x + 12, node.y + 30);
+            
+            // Typ (Badge w prawym górnym rogu)
+            ctx.font = "bold 9px Inter, sans-serif"; 
+            ctx.fillStyle = strokeStyle; 
+            ctx.textAlign = "right";
             const typeLabel = node.type === 'station' ? node.type.toUpperCase() : (node.type === 'workerPool' ? "ZASÓB" : "BUFOR");
-            ctx.fillText(typeLabel, node.x + nodeWidth - 5, node.y + 12);
-            ctx.fillStyle = "black"; ctx.font = "bold 11px Arial"; ctx.textAlign = "center";
-            wrapText(ctx, node.name, node.x + nodeWidth / 2, node.y + nodeHeight / 2 + 5, nodeWidth - 10, 12);
-            ctx.font = "9px Arial"; ctx.fillStyle = "gray"; const capText = `Cap: ${node.capacity}`; ctx.fillText(capText, node.x + nodeWidth / 2, node.y + nodeHeight - 5);
+            ctx.fillText(typeLabel, node.x + nodeWidth - 12, node.y + 20);
+
+            // Nazwa
+            ctx.fillStyle = "#1e293b"; // slate-800
+            ctx.font = "bold 11px Inter, sans-serif"; 
+            ctx.textAlign = "center";
+            wrapText(ctx, node.name, node.x + nodeWidth / 2, node.y + nodeHeight / 2 + 5, nodeWidth - 20, 14);
+
+            // Capacity (Stopka)
+            ctx.font = "10px Inter, sans-serif"; 
+            ctx.fillStyle = "#64748b"; // slate-500
+            const capText = `Cap: ${node.capacity}`; 
+            ctx.fillText(capText, node.x + nodeWidth / 2, node.y + nodeHeight - 10);
         });
         ctx.restore();
     };
@@ -142,6 +217,7 @@ export const VisualizationCanvas = () => {
         drawCanvas(ctx, canvas);
     }, [allNodes, flows, workerFlows, viewOffset, zoom]);
 
+    // Obsługa myszy (bez zmian w logice, tylko podpięcie)
     const getMousePos = (e) => { const rect = canvasRef.current.getBoundingClientRect(); const clientX = e.touches ? e.touches[0].clientX : e.clientX; const clientY = e.touches ? e.touches[0].clientY : e.clientY; return { x: (clientX - rect.left), y: (clientY - rect.top) }; };
     const getWorldPos = (screenPos) => { return { x: (screenPos.x - viewOffset.x) / zoom, y: (screenPos.y - viewOffset.y) / zoom }; };
     const isHittingNode = (worldPos, node) => { return worldPos.x > node.x && worldPos.x < node.x + nodeWidth && worldPos.y > node.y && worldPos.y < node.y + nodeHeight; };
@@ -150,5 +226,8 @@ export const VisualizationCanvas = () => {
     const handleMouseUp = (e) => { e.preventDefault(); setDraggingNode(null); setIsPanning(false); };
     const handleWheel = (e) => { e.preventDefault(); const scaleAmount = -e.deltaY * 0.001; const newZoom = Math.min(Math.max(0.5, zoom + scaleAmount), 3); setZoom(newZoom); };
     
-    return ( <canvas id="visualization-canvas" ref={canvasRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onWheel={handleWheel} onTouchStart={handleMouseDown} onTouchMove={handleMouseMove} onTouchEnd={handleMouseUp} ></canvas> );
+    return ( <canvas id="visualization-canvas" ref={canvasRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onWheel={handleWheel} onTouchStart={handleMouseDown} onTouchMove={handleMouseMove} onTouchEnd={handleMouseUp} className="cursor-grab active:cursor-grabbing"></canvas> );
 };
+
+// Aby zachować kompatybilność, jeśli gdzieś jest importowane jako default
+export default VisualizationCanvas;
