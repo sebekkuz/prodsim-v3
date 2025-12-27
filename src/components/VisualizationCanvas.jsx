@@ -11,11 +11,8 @@ export const VisualizationCanvas = () => {
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [isPanning, setIsPanning] = useState(false);
     const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
-    
-    // Zwiększone wymiary dla nowoczesnego wyglądu "Karty"
-    const nodeWidth = 140;
-    const nodeHeight = 80;
-    const nodeRadius = 12;
+    const nodeWidth = 110;
+    const nodeHeight = 70;
 
     const getIcon = (type, isBuffer = false) => {
         if (isBuffer) return "📥";
@@ -36,44 +33,24 @@ export const VisualizationCanvas = () => {
         ];
     }, [stations, buffers, workerPools]);
 
-    // Funkcja pomocnicza do rysowania zaokrąglonych prostokątów
-    const roundRect = (ctx, x, y, width, height, radius) => {
-        ctx.beginPath();
-        ctx.moveTo(x + radius, y);
-        ctx.lineTo(x + width - radius, y);
-        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-        ctx.lineTo(x + width, y + height - radius);
-        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-        ctx.lineTo(x + radius, y + height);
-        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-        ctx.lineTo(x, y + radius);
-        ctx.quadraticCurveTo(x, y, x + radius, y);
-        ctx.closePath();
-    };
-
     const drawCanvas = (ctx, canvas) => {
         const width = canvas.width;
         const height = canvas.height;
-        
-        // Tło zgodne z bg-slate-50
-        ctx.fillStyle = "#f8fafc"; 
+        ctx.fillStyle = "#f9f9f9";
         ctx.fillRect(0, 0, width, height);
-        
         ctx.save();
         ctx.translate(viewOffset.x, viewOffset.y);
         ctx.scale(zoom, zoom);
         
-        // Grid (subtelniejszy, slate-200)
+        // Grid
         ctx.beginPath();
-        ctx.strokeStyle = "#e2e8f0";
+        ctx.strokeStyle = "#e5e7eb";
         ctx.lineWidth = 1;
         const gridSize = 50;
         const startX = Math.floor(-viewOffset.x / zoom / gridSize) * gridSize;
         const startY = Math.floor(-viewOffset.y / zoom / gridSize) * gridSize;
         const endX = startX + (width / zoom) + gridSize;
         const endY = startY + (height / zoom) + gridSize;
-        
-        // Kropki zamiast linii (opcjonalnie, tutaj zostawiam linie ale bardzo jasne)
         for (let x = startX; x < endX; x += gridSize) { ctx.moveTo(x, -10000); ctx.lineTo(x, 10000); }
         for (let y = startY; y < endY; y += gridSize) { ctx.moveTo(-10000, y); ctx.lineTo(10000, y); }
         ctx.stroke();
@@ -81,7 +58,6 @@ export const VisualizationCanvas = () => {
         const nodePositions = new Map();
         allNodes.forEach(n => nodePositions.set(n.id, n));
 
-        // Rysowanie połączeń (Flows)
         const drawOrthogonalArrow = (fromX, fromY, toX, toY, color, dash, label) => {
             ctx.beginPath();
             ctx.strokeStyle = color;
@@ -89,78 +65,45 @@ export const VisualizationCanvas = () => {
             ctx.lineWidth = 2;
             ctx.setLineDash(dash || []);
             const midX = fromX + (toX - fromX) / 2;
-            
-            // Wygładzanie rogów ścieżki (bezier)
             ctx.moveTo(fromX, fromY);
             ctx.lineTo(midX, fromY);
             ctx.lineTo(midX, toY);
             ctx.lineTo(toX, toY);
             ctx.stroke();
-            
-            // Strzałka
             const headlen = 8;
             ctx.beginPath();
             ctx.moveTo(toX, toY);
-            if (fromX < toX) { ctx.lineTo(toX - headlen, toY - headlen/2); ctx.lineTo(toX - headlen, toY + headlen/2); } 
-            else { ctx.lineTo(toX + headlen, toY - headlen/2); ctx.lineTo(toX + headlen, toY + headlen/2); }
+            if (fromX < toX) { ctx.lineTo(toX - headlen, toY - headlen/2); ctx.lineTo(toX - headlen, toY + headlen/2); } else { ctx.lineTo(toX + headlen, toY - headlen/2); ctx.lineTo(toX + headlen, toY + headlen/2); }
             ctx.fill();
-            
-            // Etykieta odległości (Badge style)
             if (label) {
                 const labelX = midX;
                 const labelY = fromY + (toY - fromY) / 2;
-                ctx.font = "500 11px sans-serif";
-                const textWidth = ctx.measureText(label).width + 12;
-                const textHeight = 18;
-                
-                // Tło etykiety
-                ctx.fillStyle = "#ffffff";
-                ctx.shadowBlur = 4;
-                ctx.shadowColor = "rgba(0,0,0,0.1)";
-                roundRect(ctx, labelX - textWidth/2, labelY - textHeight/2, textWidth, textHeight, 4);
-                ctx.fill();
-                ctx.shadowBlur = 0;
-                
-                // Ramka etykiety
-                ctx.strokeStyle = "#cbd5e1";
+                ctx.font = "10px Arial";
+                const textWidth = ctx.measureText(label).width + 6;
+                const textHeight = 14;
+                ctx.fillStyle = "white";
+                ctx.fillRect(labelX - textWidth/2, labelY - textHeight/2, textWidth, textHeight);
                 ctx.lineWidth = 1;
-                ctx.stroke();
-
-                ctx.fillStyle = "#64748b"; // slate-500
+                ctx.strokeRect(labelX - textWidth/2, labelY - textHeight/2, textWidth, textHeight);
+                ctx.fillStyle = "black";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
                 ctx.fillText(label, labelX, labelY);
             }
         };
 
-        // Rysuj połączenia produktowe (ciemniejszy slate)
         flows.forEach(flow => {
             const fromNode = nodePositions.get(flow.from); const toNode = nodePositions.get(flow.to); if (!fromNode || !toNode) return;
             const startX = fromNode.x + nodeWidth; const startY = fromNode.y + nodeHeight / 2; const endX = toNode.x; const endY = toNode.y + nodeHeight / 2;
-            drawOrthogonalArrow(startX, startY, endX, endY, "#64748b", [], `${flow.distance}m`);
+            drawOrthogonalArrow(startX, startY, endX, endY, "#6b7280", [], `${flow.distance}m`);
         });
 
-        // Rysuj połączenia pracowników (bursztynowy/pomarańczowy, przerywany)
         workerFlows.forEach(flow => {
             const fromNode = nodePositions.get(flow.from); const toNode = nodePositions.get(flow.to); if (!fromNode || !toNode) return;
             const startX = fromNode.x + nodeWidth / 2; const startY = fromNode.y + nodeHeight; const endX = toNode.x + nodeWidth / 2; const endY = toNode.y;
-            
-            ctx.beginPath(); 
-            ctx.strokeStyle = "#f59e0b"; 
-            ctx.setLineDash([5, 5]);
-            const midY = startY + (endY - startY) / 2; 
-            ctx.moveTo(startX, startY); ctx.lineTo(startX, midY); ctx.lineTo(endX, midY); ctx.lineTo(endX, endY); 
-            ctx.stroke();
-            
-            // Badge dla workera
-            ctx.fillStyle = "#fffbeb"; // amber-50
-            ctx.fillRect(endX + 5, midY - 9, 34, 18); 
-            ctx.strokeStyle = "#fcd34d";
-            ctx.strokeRect(endX + 5, midY - 9, 34, 18);
-            
-            ctx.fillStyle = "#b45309"; 
-            ctx.font = "10px sans-serif"; 
-            ctx.fillText(`${flow.distance}m`, endX + 22, midY);
+            ctx.beginPath(); ctx.strokeStyle = "#f59e0b"; ctx.setLineDash([5, 5]);
+            const midY = startY + (endY - startY) / 2; ctx.moveTo(startX, startY); ctx.lineTo(startX, midY); ctx.lineTo(endX, midY); ctx.lineTo(endX, endY); ctx.stroke();
+            ctx.fillStyle = "white"; ctx.fillRect(endX + 5, midY - 7, 30, 14); ctx.fillStyle = "black"; ctx.font = "9px Arial"; ctx.fillText(`${flow.distance}m`, endX + 20, midY);
         });
 
         const wrapText = (ctx, text, x, y, maxWidth, lineHeight) => {
@@ -171,80 +114,22 @@ export const VisualizationCanvas = () => {
             lineArray.forEach((l, i) => { ctx.fillText(l, x, startY + (i * lineHeight)); });
         };
 
-        // Rysowanie Węzłów (Nodes)
         ctx.setLineDash([]);
         allNodes.forEach(node => {
-            // Cień karty (Shadow-lg)
-            ctx.shadowBlur = 15; 
-            ctx.shadowColor = "rgba(100, 116, 139, 0.15)"; 
-            ctx.shadowOffsetY = 4;
-            
-            // Tło karty (Białe)
-            ctx.fillStyle = "#ffffff";
-            roundRect(ctx, node.x, node.y, nodeWidth, nodeHeight, nodeRadius);
-            ctx.fill();
-            
-            // Obramowanie (Statusowe)
-            ctx.shadowBlur = 0;
-            ctx.shadowOffsetY = 0;
-            let accentColor = "#94a3b8"; // Default slate
-            if (node.type === 'station') accentColor = "#3b82f6"; // Blue-500
-            else if (node.type === 'buffer') accentColor = node.isStartBuffer ? "#10b981" : (node.isEndBuffer ? "#ef4444" : "#eab308");
-            else if (node.type === 'workerPool') accentColor = "#f97316"; // Orange-500
-            
-            // Aktywny/Hover border (lub po prostu kolorowy pasek u góry)
-            ctx.strokeStyle = "#e2e8f0"; // slate-200 border
-            ctx.lineWidth = 1;
-            roundRect(ctx, node.x, node.y, nodeWidth, nodeHeight, nodeRadius);
-            ctx.stroke();
-
-            // Kolorowy pasek (Top Accent)
-            ctx.beginPath();
-            ctx.fillStyle = accentColor;
-            ctx.moveTo(node.x + nodeRadius, node.y);
-            ctx.lineTo(node.x + nodeWidth - nodeRadius, node.y);
-            ctx.quadraticCurveTo(node.x + nodeWidth, node.y, node.x + nodeWidth, node.y + nodeRadius);
-            ctx.lineTo(node.x + nodeWidth, node.y + 4); // Pasek o grubości 4px
-            ctx.lineTo(node.x, node.y + 4);
-            ctx.lineTo(node.x, node.y + nodeRadius);
-            ctx.quadraticCurveTo(node.x, node.y, node.x + nodeRadius, node.y);
-            ctx.fill();
-
-            // Ikona (Emoji jako placeholder, ale większe i pozycjonowane)
-            ctx.font = "24px Arial"; 
-            ctx.fillStyle = "black"; 
-            ctx.textAlign = "left"; 
-            ctx.textBaseline = "middle";
-            ctx.fillText(node.icon, node.x + 12, node.y + nodeHeight/2);
-            
-            // Nazwa (Wytłuszczona, slate-800)
-            ctx.fillStyle = "#1e293b"; // slate-800
-            ctx.font = "bold 13px sans-serif"; 
-            ctx.textAlign = "left";
-            // Wrap text obok ikony
-            wrapText(ctx, node.name, node.x + 48, node.y + nodeHeight / 2 - 5, nodeWidth - 55, 15);
-            
-            // Typ (mały label u góry po prawej, na pasku akcentowym)
-            /*
-            ctx.font = "bold 9px sans-serif"; 
-            ctx.fillStyle = "white"; 
-            ctx.textAlign = "right";
+            ctx.fillStyle = "white"; ctx.shadowBlur = 10; ctx.shadowColor = "rgba(0,0,0,0.1)";
+            let borderColor = "#9ca3af";
+            if (node.type === 'station') borderColor = "#3b82f6";
+            else if (node.type === 'buffer') borderColor = node.isStartBuffer ? "#10b981" : (node.isEndBuffer ? "#ef4444" : "#eab308");
+            else if (node.type === 'workerPool') borderColor = "#f59e0b";
+            ctx.strokeStyle = borderColor; ctx.lineWidth = 2;
+            ctx.fillRect(node.x, node.y, nodeWidth, nodeHeight); ctx.shadowBlur = 0; ctx.strokeRect(node.x, node.y, nodeWidth, nodeHeight);
+            ctx.font = "16px Arial"; ctx.fillStyle = "black"; ctx.textAlign = "left"; ctx.fillText(node.icon, node.x + 5, node.y + 20);
+            ctx.font = "bold 9px Arial"; ctx.fillStyle = borderColor; ctx.textAlign = "right";
             const typeLabel = node.type === 'station' ? node.type.toUpperCase() : (node.type === 'workerPool' ? "ZASÓB" : "BUFOR");
-            ctx.fillText(typeLabel, node.x + nodeWidth - 8, node.y + 10);
-            */
-
-            // Capacity (Badge na dole)
-            const capText = `Cap: ${node.capacity}`;
-            ctx.font = "10px sans-serif";
-            const capWidth = ctx.measureText(capText).width + 8;
-            
-            ctx.fillStyle = "#f1f5f9"; // slate-100
-            roundRect(ctx, node.x + nodeWidth - capWidth - 5, node.y + nodeHeight - 18, capWidth, 14, 4);
-            ctx.fill();
-            
-            ctx.fillStyle = "#64748b"; // slate-500
-            ctx.textAlign = "center";
-            ctx.fillText(capText, node.x + nodeWidth - capWidth/2 - 5, node.y + nodeHeight - 11);
+            ctx.fillText(typeLabel, node.x + nodeWidth - 5, node.y + 12);
+            ctx.fillStyle = "black"; ctx.font = "bold 11px Arial"; ctx.textAlign = "center";
+            wrapText(ctx, node.name, node.x + nodeWidth / 2, node.y + nodeHeight / 2 + 5, nodeWidth - 10, 12);
+            ctx.font = "9px Arial"; ctx.fillStyle = "gray"; const capText = `Cap: ${node.capacity}`; ctx.fillText(capText, node.x + nodeWidth / 2, node.y + nodeHeight - 5);
         });
         ctx.restore();
     };
@@ -257,7 +142,6 @@ export const VisualizationCanvas = () => {
         drawCanvas(ctx, canvas);
     }, [allNodes, flows, workerFlows, viewOffset, zoom]);
 
-    // Obsługa myszy (bez zmian w logice, tylko podpięcie)
     const getMousePos = (e) => { const rect = canvasRef.current.getBoundingClientRect(); const clientX = e.touches ? e.touches[0].clientX : e.clientX; const clientY = e.touches ? e.touches[0].clientY : e.clientY; return { x: (clientX - rect.left), y: (clientY - rect.top) }; };
     const getWorldPos = (screenPos) => { return { x: (screenPos.x - viewOffset.x) / zoom, y: (screenPos.y - viewOffset.y) / zoom }; };
     const isHittingNode = (worldPos, node) => { return worldPos.x > node.x && worldPos.x < node.x + nodeWidth && worldPos.y > node.y && worldPos.y < node.y + nodeHeight; };
@@ -266,26 +150,5 @@ export const VisualizationCanvas = () => {
     const handleMouseUp = (e) => { e.preventDefault(); setDraggingNode(null); setIsPanning(false); };
     const handleWheel = (e) => { e.preventDefault(); const scaleAmount = -e.deltaY * 0.001; const newZoom = Math.min(Math.max(0.5, zoom + scaleAmount), 3); setZoom(newZoom); };
     
-    return ( 
-        <div className="w-full h-full bg-slate-50 relative overflow-hidden rounded-xl border border-slate-200 shadow-inner">
-             <canvas 
-                id="visualization-canvas" 
-                ref={canvasRef} 
-                className="cursor-crosshair block"
-                onMouseDown={handleMouseDown} 
-                onMouseMove={handleMouseMove} 
-                onMouseUp={handleMouseUp} 
-                onMouseLeave={handleMouseUp} 
-                onWheel={handleWheel} 
-                onTouchStart={handleMouseDown} 
-                onTouchMove={handleMouseMove} 
-                onTouchEnd={handleMouseUp} 
-            ></canvas>
-            
-            {/* Overlay z instrukcją sterowania */}
-            <div className="absolute bottom-4 right-4 bg-white/90 backdrop-blur px-3 py-2 rounded-lg border border-slate-200 shadow-sm text-xs text-slate-500 pointer-events-none">
-                Scroll: Zoom | Drag: Pan
-            </div>
-        </div>
-    );
+    return ( <canvas id="visualization-canvas" ref={canvasRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onWheel={handleWheel} onTouchStart={handleMouseDown} onTouchMove={handleMouseMove} onTouchEnd={handleMouseUp} ></canvas> );
 };
